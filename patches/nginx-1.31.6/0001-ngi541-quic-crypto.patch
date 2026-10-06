@@ -1,0 +1,528 @@
+--- a/src/event/quic/ngx_event_quic_protection.h
++++ b/src/event/quic/ngx_event_quic_protection.h
+@@ -13,6 +13,10 @@
+ 
+ #include <ngx_event_quic_transport.h>
+ 
++#if (NGX_QUIC_NGI541)
++#include <ngi541/engine.h>
++#endif
++
+ 
+ /* RFC 5116, 5.1/5.3 and RFC 8439, 2.3/2.5 for all supported ciphers */
+ #define NGX_QUIC_IV_LEN               12
+@@ -51,6 +55,11 @@
+     ngx_quic_md_t             hp;
+     ngx_quic_crypto_ctx_t    *ctx;
+     EVP_CIPHER_CTX           *hp_ctx;
++
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    ngi541_aead_key_t         *ngi541_aead_ctx;
++    ngi541_cipher_key_t       *ngi541_hp_ctx;
++#endif
+ } ngx_quic_secret_t;
+ 
+ 
+--- a/src/event/quic/ngx_event_quic_protection.c
++++ b/src/event/quic/ngx_event_quic_protection.c
+@@ -44,8 +44,8 @@
+     const u_char *nonce, ngx_str_t *in, ngx_str_t *ad, ngx_log_t *log);
+ #endif
+ 
+-static ngx_int_t ngx_quic_crypto_hp_init(const EVP_CIPHER *cipher,
+-    ngx_quic_secret_t *s, ngx_log_t *log);
++static ngx_int_t ngx_quic_crypto_hp_init(ngx_uint_t cipher_id,
++    const EVP_CIPHER *cipher, ngx_quic_secret_t *s, ngx_log_t *log);
+ static ngx_int_t ngx_quic_crypto_hp(ngx_quic_secret_t *s,
+     u_char *out, u_char *in, ngx_log_t *log);
+ static void ngx_quic_crypto_hp_cleanup(ngx_quic_secret_t *s);
+@@ -55,6 +55,24 @@
+ static ngx_int_t ngx_quic_create_retry_packet(ngx_quic_header_t *pkt,
+     ngx_str_t *res);
+ 
++static ngx_int_t ngx_quic_crypto_backend_init(ngx_uint_t cipher_id,
++    const ngx_quic_cipher_t *cipher, ngx_quic_secret_t *s,
++    ngx_quic_md_t *key, ngx_int_t enc, ngx_log_t *log);
++
++static ngx_uint_t ngx_quic_crypto_available(ngx_quic_secret_t *s);
++
++
++static ngx_uint_t
++ngx_quic_crypto_available(ngx_quic_secret_t *s)
++{
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    if (s->ngi541_aead_ctx != NULL) {
++        return 1;
++    }
++#endif
++
++    return s->ctx != NULL;
++}
+ 
+ ngx_int_t
+ ngx_quic_ciphers(ngx_uint_t id, ngx_quic_ciphers_t *ciphers)
+@@ -200,23 +218,31 @@
+         return NGX_ERROR;
+     }
+ 
+-    if (ngx_quic_crypto_init(ciphers.c, client, &client_key, 0, log)
++    if (ngx_quic_crypto_backend_init(NGX_QUIC_INITIAL_CIPHER, ciphers.c,
++                             client, &client_key, 0, log)
+         == NGX_ERROR)
+     {
+         return NGX_ERROR;
+     }
+ 
+-    if (ngx_quic_crypto_init(ciphers.c, server, &server_key, 1, log)
++    if (ngx_quic_crypto_backend_init(NGX_QUIC_INITIAL_CIPHER, ciphers.c,
++                             server, &server_key, 1, log)
+         == NGX_ERROR)
+     {
+         goto failed;
+     }
+ 
+-    if (ngx_quic_crypto_hp_init(ciphers.hp, client, log) == NGX_ERROR) {
++    if (ngx_quic_crypto_hp_init(NGX_QUIC_INITIAL_CIPHER, ciphers.hp,
++                                client, log)
++        == NGX_ERROR)
++    {
+         goto failed;
+     }
+ 
+-    if (ngx_quic_crypto_hp_init(ciphers.hp, server, log) == NGX_ERROR) {
++    if (ngx_quic_crypto_hp_init(NGX_QUIC_INITIAL_CIPHER, ciphers.hp,
++                                server, log)
++        == NGX_ERROR)
++    {
+         goto failed;
+     }
+ 
+@@ -389,11 +415,74 @@
+ }
+ 
+ 
++static ngx_int_t
++ngx_quic_crypto_backend_init(ngx_uint_t cipher_id,
++    const ngx_quic_cipher_t *cipher, ngx_quic_secret_t *s,
++    ngx_quic_md_t *key, ngx_int_t enc, ngx_log_t *log)
++{
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    ngi541_status_t           status;
++    ngi541_aead_key_params_t  params;
++
++    switch (cipher_id) {
++
++    case TLS1_3_CK_AES_128_GCM_SHA256:
++    case TLS1_3_CK_AES_256_GCM_SHA384:
++
++        status = ngi541_engine_init();
++
++        if (status != NGI541_STATUS_OK) {
++            ngx_log_error(NGX_LOG_ERR, log, 0,
++                          "ngi541_engine_init() failed, status:%d",
++                          (int) status);
++            return NGX_ERROR;
++        }
++
++        params = (ngi541_aead_key_params_t) {
++            .struct_size = sizeof(params),
++            .algorithm = NGI541_AEAD_AES_GCM,
++            .key = key->data,
++            .key_len = key->len,
++        };
++
++        s->ctx = NULL;
++        s->ngi541_aead_ctx = NULL;
++
++        status = ngi541_crypto_aead_key_create(
++                     &params, &s->ngi541_aead_ctx);
++
++        if (status != NGI541_STATUS_OK) {
++            ngx_log_error(NGX_LOG_ERR, log, 0,
++                          "ngi541_crypto_aead_key_create() failed, "
++                          "status:%d",
++                          (int) status);
++            return NGX_ERROR;
++        }
++
++        ngx_log_debug2(NGX_LOG_DEBUG_EVENT, log, 0,
++                       "quic NGI541 packet protection initialized "
++                       "key_len:%uz enc:%d",
++                       key->len, (int) enc);
++
++        return NGX_OK;
++
++    default:
++        break;
++    }
++#endif
++
++    return ngx_quic_crypto_init(cipher, s, key, enc, log);
++}
++
+ ngx_int_t
+ ngx_quic_crypto_init(const ngx_quic_cipher_t *cipher, ngx_quic_secret_t *s,
+     ngx_quic_md_t *key, ngx_int_t enc, ngx_log_t *log)
+ {
+ 
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    s->ngi541_aead_ctx = NULL;
++#endif
++
+ #if (NGX_QUIC_BORINGSSL_EVP_API)
+     EVP_AEAD_CTX  *ctx;
+ 
+@@ -454,6 +543,65 @@
+ ngx_quic_crypto_open(ngx_quic_secret_t *s, ngx_str_t *out, const u_char *nonce,
+     ngx_str_t *in, ngx_str_t *ad, ngx_log_t *log)
+ {
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    if (s->ngi541_aead_ctx != NULL) {
++        size_t                              ciphertext_len;
++        ngi541_status_t                     status;
++        ngi541_aead_decrypt_exec_request_t  request;
++
++        if (in->len < NGX_QUIC_TAG_LEN) {
++            return NGX_ERROR;
++        }
++
++        ciphertext_len = in->len - NGX_QUIC_TAG_LEN;
++
++        if (out->len < ciphertext_len) {
++            ngx_log_error(NGX_LOG_ERR, log, 0,
++                          "NGI541 QUIC decrypt output buffer too small");
++            return NGX_ERROR;
++        }
++
++        request = (ngi541_aead_decrypt_exec_request_t) {
++            .struct_size = sizeof(request),
++
++            .iv = nonce,
++            .iv_len = NGX_QUIC_IV_LEN,
++
++            .aad = ad->data,
++            .aad_len = ad->len,
++
++            .ciphertext = in->data,
++            .ciphertext_len = ciphertext_len,
++
++            .tag = in->data + ciphertext_len,
++            .tag_len = NGX_QUIC_TAG_LEN,
++
++            .plaintext = out->data,
++            .plaintext_capacity = out->len,
++        };
++
++        status = ngi541_crypto_aead_decrypt_prepared(
++                     s->ngi541_aead_ctx, &request);
++
++        if (status == NGI541_STATUS_AUTH_FAILED) {
++            ngx_log_debug0(NGX_LOG_DEBUG_EVENT, log, 0,
++                           "quic NGI541 packet authentication failed");
++            return NGX_ERROR;
++        }
++
++        if (status != NGI541_STATUS_OK) {
++            ngx_log_error(NGX_LOG_ERR, log, 0,
++                          "ngi541 QUIC packet decrypt failed, status:%d",
++                          (int) status);
++            return NGX_ERROR;
++        }
++
++        out->len = ciphertext_len;
++
++        return NGX_OK;
++    }
++#endif
++
+ #if (NGX_QUIC_BORINGSSL_EVP_API)
+     if (EVP_AEAD_CTX_open(s->ctx, out->data, &out->len, out->len, nonce,
+                           s->iv.len, in->data, in->len, ad->data, ad->len)
+@@ -474,6 +622,53 @@
+ ngx_quic_crypto_seal(ngx_quic_secret_t *s, ngx_str_t *out, const u_char *nonce,
+     ngx_str_t *in, ngx_str_t *ad, ngx_log_t *log)
+ {
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    if (s->ngi541_aead_ctx != NULL) {
++        ngi541_status_t                     status;
++        ngi541_aead_encrypt_exec_request_t  request;
++
++        if (out->len < in->len + NGX_QUIC_TAG_LEN) {
++            ngx_log_error(NGX_LOG_ERR, log, 0,
++                          "NGI541 QUIC encrypt output buffer too small");
++            return NGX_ERROR;
++        }
++
++        request = (ngi541_aead_encrypt_exec_request_t) {
++            .struct_size = sizeof(request),
++
++            .iv = nonce,
++            .iv_len = NGX_QUIC_IV_LEN,
++
++            .aad = ad->data,
++            .aad_len = ad->len,
++
++            .plaintext = in->data,
++            .plaintext_len = in->len,
++
++            .ciphertext = out->data,
++            .ciphertext_capacity =
++                out->len - NGX_QUIC_TAG_LEN,
++
++            .tag = out->data + in->len,
++            .tag_len = NGX_QUIC_TAG_LEN,
++        };
++
++        status = ngi541_crypto_aead_encrypt_prepared(
++                     s->ngi541_aead_ctx, &request);
++
++        if (status != NGI541_STATUS_OK) {
++            ngx_log_error(NGX_LOG_ERR, log, 0,
++                          "ngi541 QUIC packet encrypt failed, status:%d",
++                          (int) status);
++            return NGX_ERROR;
++        }
++
++        out->len = in->len + NGX_QUIC_TAG_LEN;
++
++        return NGX_OK;
++    }
++#endif
++
+ #if (NGX_QUIC_BORINGSSL_EVP_API)
+     if (EVP_AEAD_CTX_seal(s->ctx, out->data, &out->len, out->len, nonce,
+                           s->iv.len, in->data, in->len, ad->data, ad->len)
+@@ -568,6 +763,13 @@
+ void
+ ngx_quic_crypto_cleanup(ngx_quic_secret_t *s)
+ {
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    if (s->ngi541_aead_ctx != NULL) {
++        ngi541_crypto_aead_key_destroy(s->ngi541_aead_ctx);
++        s->ngi541_aead_ctx = NULL;
++    }
++#endif
++
+     if (s->ctx) {
+ #if (NGX_QUIC_BORINGSSL_EVP_API)
+         EVP_AEAD_CTX_free(s->ctx);
+@@ -580,11 +782,59 @@
+ 
+ 
+ static ngx_int_t
+-ngx_quic_crypto_hp_init(const EVP_CIPHER *cipher, ngx_quic_secret_t *s,
+-    ngx_log_t *log)
++ngx_quic_crypto_hp_init(ngx_uint_t cipher_id, const EVP_CIPHER *cipher,
++    ngx_quic_secret_t *s, ngx_log_t *log)
+ {
+     EVP_CIPHER_CTX  *ctx;
+ 
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    ngi541_status_t             status;
++    ngi541_cipher_key_params_t  params;
++
++    switch (cipher_id) {
++
++    case TLS1_3_CK_AES_128_GCM_SHA256:
++    case TLS1_3_CK_AES_256_GCM_SHA384:
++
++        status = ngi541_engine_init();
++
++        if (status != NGI541_STATUS_OK) {
++            ngx_log_error(NGX_LOG_ERR, log, 0,
++                          "ngi541_engine_init() failed, status:%d",
++                          (int) status);
++            return NGX_ERROR;
++        }
++
++        params = (ngi541_cipher_key_params_t) {
++            .struct_size = sizeof(params),
++            .algorithm = NGI541_CIPHER_AES_CTR,
++            .key = s->hp.data,
++            .key_len = s->hp.len,
++        };
++
++        status = ngi541_crypto_cipher_key_create(
++                     &params, &s->ngi541_hp_ctx);
++
++        if (status != NGI541_STATUS_OK) {
++            ngx_log_error(NGX_LOG_ERR, log, 0,
++                          "ngi541_crypto_cipher_key_create() failed, "
++                          "status:%d",
++                          (int) status);
++            return NGX_ERROR;
++        }
++
++        ngx_log_debug1(NGX_LOG_DEBUG_EVENT, log, 0,
++                       "quic NGI541 header protection initialized "
++                       "key_len:%uz",
++                       s->hp.len);
++
++        return NGX_OK;
++
++    default:
++        break;
++    }
++#endif
++
+ #if (NGX_QUIC_BORINGSSL_EVP_API)
+     if (cipher == (EVP_CIPHER *) EVP_aead_chacha20_poly1305()) {
+         /* no EVP interface */
+@@ -594,6 +844,7 @@
+ #endif
+ 
+     ctx = EVP_CIPHER_CTX_new();
++
+     if (ctx == NULL) {
+         ngx_ssl_error(NGX_LOG_INFO, log, 0, "EVP_CIPHER_CTX_new() failed");
+         return NGX_ERROR;
+@@ -601,11 +852,15 @@
+ 
+     if (EVP_EncryptInit_ex(ctx, cipher, NULL, s->hp.data, NULL) != 1) {
+         EVP_CIPHER_CTX_free(ctx);
+-        ngx_ssl_error(NGX_LOG_INFO, log, 0, "EVP_EncryptInit_ex() failed");
++
++        ngx_ssl_error(NGX_LOG_INFO, log, 0,
++                      "EVP_EncryptInit_ex() failed");
++
+         return NGX_ERROR;
+     }
+ 
+     s->hp_ctx = ctx;
++
+     return NGX_OK;
+ }
+ 
+@@ -619,6 +874,39 @@
+ 
+     static const u_char zero[NGX_QUIC_HP_LEN];
+ 
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    if (s->ngi541_hp_ctx != NULL) {
++        ngi541_status_t               status;
++        ngi541_cipher_exec_request_t  request;
++
++        request = (ngi541_cipher_exec_request_t) {
++            .struct_size = sizeof(request),
++
++            .iv = in,
++            .iv_len = 16,
++
++            .input = zero,
++            .input_len = NGX_QUIC_HP_LEN,
++
++            .output = out,
++            .output_capacity = NGX_QUIC_HP_LEN,
++        };
++
++        status = ngi541_crypto_cipher_encrypt_prepared(
++                     s->ngi541_hp_ctx, &request);
++
++        if (status != NGI541_STATUS_OK) {
++            ngx_log_error(NGX_LOG_ERR, log, 0,
++                          "ngi541 QUIC header protection failed, "
++                          "status:%d",
++                          (int) status);
++            return NGX_ERROR;
++        }
++
++        return NGX_OK;
++    }
++#endif
++
+     ctx = s->hp_ctx;
+ 
+ #if (NGX_QUIC_BORINGSSL_EVP_API)
+@@ -653,6 +941,13 @@
+ static void
+ ngx_quic_crypto_hp_cleanup(ngx_quic_secret_t *s)
+ {
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    if (s->ngi541_hp_ctx != NULL) {
++        ngi541_crypto_cipher_key_destroy(s->ngi541_hp_ctx);
++        s->ngi541_hp_ctx = NULL;
++    }
++#endif
++
+     if (s->hp_ctx) {
+         EVP_CIPHER_CTX_free(s->hp_ctx);
+         s->hp_ctx = NULL;
+@@ -711,13 +1006,16 @@
+         }
+     }
+ 
+-    if (ngx_quic_crypto_init(ciphers.c, peer_secret, &key, is_write, log)
++    if (ngx_quic_crypto_backend_init(keys->cipher, ciphers.c, peer_secret,
++                                 &key, is_write, log)
+         == NGX_ERROR)
+     {
+         return NGX_ERROR;
+     }
+ 
+-    if (ngx_quic_crypto_hp_init(ciphers.hp, peer_secret, log) == NGX_ERROR) {
++    if (ngx_quic_crypto_hp_init(keys->cipher, ciphers.hp, peer_secret, log)
++        == NGX_ERROR)
++    {
+         return NGX_ERROR;
+     }
+ 
+@@ -732,10 +1030,10 @@
+     ngx_uint_t is_write)
+ {
+     if (is_write == 0) {
+-        return keys->secrets[level].client.ctx != NULL;
++        return ngx_quic_crypto_available(&keys->secrets[level].client);
+     }
+ 
+-    return keys->secrets[level].server.ctx != NULL;
++    return ngx_quic_crypto_available(&keys->secrets[level].server);
+ }
+ 
+ 
+@@ -820,11 +1118,19 @@
+     next->client.hp = current->client.hp;
+     next->client.hp_ctx = current->client.hp_ctx;
+ 
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    next->client.ngi541_hp_ctx = current->client.ngi541_hp_ctx;
++#endif
++
+     next->server.secret.len = current->server.secret.len;
+     next->server.iv.len = NGX_QUIC_IV_LEN;
+     next->server.hp = current->server.hp;
+     next->server.hp_ctx = current->server.hp_ctx;
+ 
++#if defined(NGX_QUIC_NGI541) && (NGX_QUIC_NGI541)
++    next->server.ngi541_hp_ctx = current->server.ngi541_hp_ctx;
++#endif
++
+     ngx_quic_hkdf_set(&seq[0], "tls13 quic ku",
+                       &next->client.secret, &current->client.secret);
+     ngx_quic_hkdf_set(&seq[1], "tls13 quic key",
+@@ -844,13 +1150,15 @@
+         }
+     }
+ 
+-    if (ngx_quic_crypto_init(ciphers.c, &next->client, &client_key, 0, c->log)
++    if (ngx_quic_crypto_backend_init(keys->cipher, ciphers.c,
++                             &next->client, &client_key, 0, c->log)
+         == NGX_ERROR)
+     {
+         goto failed;
+     }
+ 
+-    if (ngx_quic_crypto_init(ciphers.c, &next->server, &server_key, 1, c->log)
++    if (ngx_quic_crypto_backend_init(keys->cipher, ciphers.c,
++                             &next->server, &server_key, 1, c->log)
+         == NGX_ERROR)
+     {
+         goto failed;
+@@ -1169,7 +1477,7 @@
+         key_phase = (pkt->flags & NGX_QUIC_PKT_KPHASE) != 0;
+ 
+         if (key_phase != pkt->key_phase) {
+-            if (pkt->keys->next_key.client.ctx != NULL) {
++            if (ngx_quic_crypto_available(&pkt->keys->next_key.client)) {
+                 secret = &pkt->keys->next_key.client;
+                 pkt->key_update = 1;
+ 

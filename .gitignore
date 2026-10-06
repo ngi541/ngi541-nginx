@@ -1,0 +1,11 @@
+# Downloaded upstream sources
+src/
+
+# Local installations / build output
+install/
+build/
+work/
+
+# Logs and temporary files
+*.log
+.DS_Store
