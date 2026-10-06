@@ -1,0 +1,256 @@
+name: NGI541 NGINX Integration
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ngi541-nginx-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+
+jobs:
+  functional-validation:
+    name: QUIC functional validation
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout ngi541-nginx
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show runner environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== system ====="
+          sw_vers
+          uname -a
+          uname -m
+
+          echo
+          echo "===== compiler ====="
+          clang --version
+
+          echo
+          echo "===== repository ====="
+          git rev-parse HEAD
+
+      - name: Validate pinned versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source config/versions.env
+
+          required=(
+            NGINX_VERSION
+            NGINX_SHA256
+            OPENSSL_VERSION
+            OPENSSL_SHA256
+            NGI541_VERSION
+            NGI541_GIT_URL
+            NGI541_COMMIT
+            NGINX_TESTS_COMMIT
+          )
+
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "ERROR: missing required version variable: $name" >&2
+              exit 1
+            fi
+          done
+
+          if [[ ! "$NGI541_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: NGI541_COMMIT must be a full 40-character SHA" >&2
+            exit 1
+          fi
+
+          if [[ ! "$NGINX_TESTS_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: NGINX_TESTS_COMMIT must be a full 40-character SHA" >&2
+            exit 1
+          fi
+
+          echo "PASS: pinned versions validated"
+
+      - name: Install build and test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          brew install \
+            cmake \
+            pcre2 \
+            openssl@3 \
+            cpanminus
+
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+
+          cpanm --notest CryptX
+
+          perl -MCrypt::AuthEnc::GCM -e \
+            'print "PASS: Perl CryptX available\n"'
+
+      - name: Checkout exact NGI541 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source config/versions.env
+
+          NGI541_SOURCE="$RUNNER_TEMP/ngi541"
+
+          git clone \
+            --filter=blob:none \
+            --no-checkout \
+            "$NGI541_GIT_URL" \
+            "$NGI541_SOURCE"
+
+          git -C "$NGI541_SOURCE" \
+            fetch \
+            --depth=1 \
+            origin \
+            "$NGI541_COMMIT"
+
+          git -C "$NGI541_SOURCE" \
+            checkout \
+            --detach \
+            FETCH_HEAD
+
+          actual="$(
+            git -C "$NGI541_SOURCE" rev-parse HEAD
+          )"
+
+          if [[ "$actual" != "$NGI541_COMMIT" ]]; then
+            echo "ERROR: NGI541 commit mismatch" >&2
+            echo "expected: $NGI541_COMMIT" >&2
+            echo "actual:   $actual" >&2
+            exit 1
+          fi
+
+          git -C "$NGI541_SOURCE" \
+            submodule update \
+            --init \
+            --recursive
+
+          echo "PASS: NGI541 exact commit $actual"
+
+      - name: Build and install NGI541
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source config/versions.env
+
+          NGI541_SOURCE="$RUNNER_TEMP/ngi541"
+          NGI541_BUILD="$RUNNER_TEMP/ngi541-build"
+          NGI541_PREFIX="$RUNNER_TEMP/ngi541-install"
+
+          cmake \
+            -S "$NGI541_SOURCE" \
+            -B "$NGI541_BUILD" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNGI541_BUILD_ENGINE=ON \
+            -DNGI541_BUILD_TESTS=OFF \
+            -DNGI541_BUILD_EXAMPLES=OFF \
+            -DNGI541_BUILD_DIFFERENTIAL_TESTS=OFF \
+            -DNGI541_BUILD_ACVP=OFF \
+            -DCMAKE_INSTALL_PREFIX="$NGI541_PREFIX"
+
+          cmake \
+            --build "$NGI541_BUILD" \
+            --parallel "$(sysctl -n hw.ncpu)"
+
+          cmake \
+            --install "$NGI541_BUILD"
+
+          test -f \
+            "$NGI541_PREFIX/include/ngi541/engine.h"
+
+          find "$NGI541_PREFIX/lib" \
+            -maxdepth 1 \
+            -name 'libngi541_engine*' \
+            -print
+
+          echo "NGI541_PREFIX=$NGI541_PREFIX" >> "$GITHUB_ENV"
+
+          echo "PASS: NGI541 $NGI541_VERSION installed"
+
+      - name: Fetch pinned NGINX dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p work/ci
+
+          ./scripts/fetch-deps.sh \
+            2>&1 | tee work/ci/fetch-deps.log
+
+      - name: Build NGINX with NGI541
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PCRE2_PREFIX
+          PCRE2_PREFIX="$(brew --prefix pcre2)"
+
+          ./scripts/build.sh \
+            2>&1 | tee work/ci/build.log
+
+      - name: Verify NGI541 linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source config/versions.env
+
+          NGINX_BINARY="src/nginx-${NGINX_VERSION}/objs/nginx"
+
+          echo "===== NGINX ====="
+          "$NGINX_BINARY" -V 2>&1
+
+          echo
+          echo "===== NGI541 imports ====="
+
+          nm -u "$NGINX_BINARY" \
+            | grep ngi541 \
+            | sort
+
+          echo
+          echo "===== NGI541 linkage ====="
+
+          otool -L "$NGINX_BINARY" \
+            | grep ngi541
+
+      - name: Run functional validation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./scripts/test.sh \
+            2>&1 | tee work/ci/test.log
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ngi541-nginx-validation-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            work/ci/
+            work/test-results/
+            evidence/
