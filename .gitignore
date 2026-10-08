@@ -9,3 +9,6 @@ work/
 # Logs and temporary files
 *.log
 .DS_Store
+
+__pycache__/
+*.py[cod]
