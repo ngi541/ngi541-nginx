@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ngi541.org/schemas/experiment/measurement-v1.schema.json",
+  "title": "NGI541 experiment measurement attempt",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "run_id",
+    "attempt",
+    "variant",
+    "parameters",
+    "timing",
+    "metrics",
+    "execution"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "experiment_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*-[a-z0-9][a-z0-9-]*-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{6}$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run-\\d{4,}$"
+    },
+    "pair_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "variant": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "timing": {
+      "type": "object",
+      "required": [
+        "started_at",
+        "finished_at",
+        "elapsed_ns"
+      ],
+      "properties": {
+        "started_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+        },
+        "finished_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+        },
+        "elapsed_ns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "requests": {
+      "type": "object",
+      "required": [
+        "planned",
+        "completed"
+      ],
+      "properties": {
+        "planned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "operations": {
+      "type": "object",
+      "required": [
+        "planned",
+        "completed"
+      ],
+      "properties": {
+        "planned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": [
+          "number",
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "execution": {
+      "type": "object",
+      "required": [
+        "exit_code",
+        "valid",
+        "failure"
+      ],
+      "properties": {
+        "exit_code": {
+          "type": "integer"
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "failure": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "observations": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "anyOf": [
+    {
+      "required": [
+        "requests"
+      ]
+    },
+    {
+      "required": [
+        "operations"
+      ]
+    }
+  ],
+  "additionalProperties": false
+}

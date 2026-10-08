@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ngi541.org/schemas/experiment/manifest-v1.schema.json",
+  "title": "NGI541 experiment manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "experiment",
+    "framework",
+    "software",
+    "topology",
+    "config",
+    "environment",
+    "provenance",
+    "execution"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "experiment": {
+      "type": "object",
+      "required": [
+        "id",
+        "workload",
+        "environment",
+        "created_at"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*-[a-z0-9][a-z0-9-]*-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{6}$"
+        },
+        "alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workload": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "environment": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "framework": {
+      "type": "object",
+      "required": [
+        "repository",
+        "commit"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "software": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "topology": {
+      "type": "object",
+      "required": [
+        "class",
+        "nodes"
+      ],
+      "properties": {
+        "class": {
+          "type": "string",
+          "pattern": "^T[0-9]+$"
+        },
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "roles"
+            ],
+            "properties": {
+              "roles": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "load-generator",
+                    "dut",
+                    "upstream",
+                    "controller",
+                    "observer"
+                  ]
+                }
+              },
+              "inventory_path": {
+                "type": "string"
+              },
+              "address": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "config": {
+      "type": "object",
+      "required": [
+        "request",
+        "resolved"
+      ],
+      "properties": {
+        "request": {
+          "const": "config/request.json"
+        },
+        "resolved": {
+          "const": "config/resolved.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "environment": {
+      "type": "object",
+      "required": [
+        "adapter",
+        "nodes_root"
+      ],
+      "properties": {
+        "adapter": {
+          "const": "environment/adapter.json"
+        },
+        "nodes_root": {
+          "const": "environment/nodes"
+        }
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "sources",
+        "dependencies",
+        "build",
+        "binaries"
+      ],
+      "properties": {
+        "sources": {
+          "const": "provenance/sources.json"
+        },
+        "dependencies": {
+          "const": "provenance/dependencies.json"
+        },
+        "build": {
+          "const": "provenance/build.json"
+        },
+        "binaries": {
+          "const": "provenance/binaries.sha256"
+        }
+      },
+      "additionalProperties": false
+    },
+    "execution": {
+      "type": "object",
+      "required": [
+        "schedule"
+      ],
+      "properties": {
+        "schedule": {
+          "const": "execution/schedule.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

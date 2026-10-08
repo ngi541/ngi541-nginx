@@ -1,0 +1,71 @@
+# Experiment JSON schemas
+
+This directory contains machine-readable JSON Schema definitions for the R5 experiment contract.
+
+Schemas use JSON Schema Draft 2020-12.
+
+Current schemas:
+
+```text
+manifest.schema.json
+state.schema.json
+schedule.schema.json
+measurement.schema.json
+```
+
+The schemas are framework contracts, not historical descriptions of `c2.1-local-http3`.
+
+## Runtime dependency policy
+
+The R5 core framework must not require a third-party JSON Schema implementation at runtime.
+
+Python 3 standard-library code will enforce core invariants directly.
+
+These schema files exist to:
+
+- document the contract precisely;
+- support optional validation in development and CI;
+- make generated artifacts externally understandable;
+- allow downstream users to validate experiments with standard JSON Schema tooling.
+
+## Versioning
+
+Each generated artifact contains:
+
+```json
+{
+  "schema_version": 1
+}
+```
+
+Backward-incompatible schema changes require a new integer schema version.
+
+## Common conventions
+
+Timestamps use UTC RFC 3339:
+
+```text
+2026-10-09T21:45:12Z
+```
+
+Run IDs use:
+
+```text
+run-0001
+```
+
+Pair IDs use:
+
+```text
+pair-0001
+```
+
+Canonical variants include:
+
+```text
+stock
+ngi541-direct
+ngi541-provider
+```
+
+Workload-specific parameters and observations remain extensible JSON objects.
