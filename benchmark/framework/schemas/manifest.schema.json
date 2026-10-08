@@ -193,7 +193,8 @@
         "sources",
         "dependencies",
         "build",
-        "binaries"
+        "binaries",
+        "preflight"
       ],
       "properties": {
         "sources": {
@@ -207,6 +208,9 @@
         },
         "binaries": {
           "const": "provenance/binaries.sha256"
+        },
+        "preflight": {
+          "const": "provenance/preflight.json"
         }
       },
       "additionalProperties": false

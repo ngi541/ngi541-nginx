@@ -13,17 +13,41 @@ BENCHMARK_DIR = SCRIPT_DIR.parent
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
 
-from framework.ids import generate_experiment_id, utc_rfc3339, validate_slug
+from framework.environment import prepare_environment
+from framework.ids import (
+    generate_experiment_id,
+    utc_rfc3339,
+    validate_slug,
+)
 from framework.io_utils import (
     FrameworkError,
     append_log,
     atomic_write_json,
+    atomic_write_text,
     read_json,
     write_immutable_json,
 )
-from framework.lifecycle import initial_state, transition, update_run_counts
+from framework.lifecycle import (
+    initial_state,
+    load_state,
+    transition,
+    update_run_counts,
+)
+from framework.manifest import build_manifest
+from framework.provenance import (
+    discover_dependencies,
+    discover_sources,
+    record_binaries,
+    record_build,
+    run_preflight,
+)
+from framework.readme import generate_prepared_readme
 from framework.schedule import build_schedule, resolve_common_request
-from framework.validation import COMMON_DIRS, validate_experiment, validate_request
+from framework.validation import (
+    COMMON_DIRS,
+    validate_experiment,
+    validate_request,
+)
 
 
 REPO_ROOT = SCRIPT_DIR.parents[1]
@@ -133,6 +157,13 @@ def command_create(args: argparse.Namespace) -> int:
 
 def command_plan(args: argparse.Namespace) -> int:
     path = ensure_experiment_exists(args.experiment_id)
+    state = load_state(path)
+
+    if state["state"] != "PREPARING":
+        raise FrameworkError(
+            "plan requires PREPARING state; "
+            f"current state is {state['state']}"
+        )
 
     request = read_json(path / "config" / "request.json")
     validate_request(request)
@@ -161,6 +192,193 @@ def command_plan(args: argparse.Namespace) -> int:
     print(f"experiment: {args.experiment_id}")
     print(f"runs:       {len(schedule['runs'])}")
     print(f"mode:       {schedule['comparison_mode']}")
+    return 0
+
+
+def _ensure_preparing(path: Path) -> None:
+    state = load_state(path)
+
+    if state["state"] == "FAILED":
+        transition(path, "PREPARING")
+        return
+
+    if state["state"] != "PREPARING":
+        raise FrameworkError(
+            "prepare requires PREPARING or FAILED state; "
+            f"current state is {state['state']}"
+        )
+
+
+def command_prepare(args: argparse.Namespace) -> int:
+    path = ensure_experiment_exists(args.experiment_id)
+    _ensure_preparing(path)
+
+    if not (path / "config" / "resolved.json").is_file():
+        raise FrameworkError(
+            "experiment must be planned before prepare"
+        )
+
+    if not (path / "execution" / "schedule.json").is_file():
+        raise FrameworkError(
+            "execution schedule is missing; run plan first"
+        )
+
+    request = read_json(path / "config" / "request.json")
+
+    try:
+        adapter = prepare_environment(
+            path,
+            request["environment"],
+        )
+
+        sources = discover_sources(
+            REPO_ROOT,
+            args.source,
+        )
+        dependencies = discover_dependencies(REPO_ROOT)
+
+        binaries = record_binaries(
+            REPO_ROOT,
+            args.binary,
+            path / "provenance" / "binaries.sha256",
+        )
+
+        build = record_build(
+            REPO_ROOT,
+            binaries,
+        )
+
+        preflight = run_preflight(
+            path,
+            REPO_ROOT,
+            args.preflight,
+        )
+
+        atomic_write_json(
+            path / "provenance" / "sources.json",
+            sources,
+        )
+        atomic_write_json(
+            path / "provenance" / "dependencies.json",
+            dependencies,
+        )
+        atomic_write_json(
+            path / "provenance" / "build.json",
+            build,
+        )
+        atomic_write_json(
+            path / "provenance" / "preflight.json",
+            preflight,
+        )
+
+        if not preflight["passed"]:
+            raise FrameworkError(
+                "one or more preparation preflight checks failed"
+            )
+
+    except Exception as exc:
+        state = load_state(path)
+        if state["state"] == "PREPARING":
+            transition(
+                path,
+                "FAILED",
+                failure={
+                    "stage": "preparing",
+                    "message": str(exc),
+                    "run_id": None,
+                },
+            )
+        raise
+
+    append_log(
+        path / "logs" / "framework.log",
+        f"{utc_rfc3339()} preparation artifacts collected "
+        f"adapter={adapter['adapter']} "
+        f"sources={len(sources['sources'])} "
+        f"binaries={len(binaries['artifacts'])}",
+    )
+
+    print(f"experiment: {args.experiment_id}")
+    print(f"environment: {adapter['adapter']}")
+    print(f"sources:     {len(sources['sources'])}")
+    print(f"binaries:    {len(binaries['artifacts'])}")
+    print("preflight:   PASS")
+    print("state:       PREPARING")
+    return 0
+
+
+def command_seal(args: argparse.Namespace) -> int:
+    path = ensure_experiment_exists(args.experiment_id)
+    state = load_state(path)
+
+    if state["state"] != "PREPARING":
+        raise FrameworkError(
+            "seal requires PREPARING state; "
+            f"current state is {state['state']}"
+        )
+
+    required = (
+        "config/resolved.json",
+        "environment/adapter.json",
+        "provenance/sources.json",
+        "provenance/dependencies.json",
+        "provenance/build.json",
+        "provenance/binaries.sha256",
+        "provenance/preflight.json",
+        "execution/schedule.json",
+    )
+
+    missing = [
+        rel
+        for rel in required
+        if not (path / rel).is_file()
+    ]
+    if missing:
+        raise FrameworkError(
+            "cannot seal experiment; missing preparation artifacts: "
+            + ", ".join(missing)
+        )
+
+    preflight = read_json(path / "provenance" / "preflight.json")
+    if not preflight.get("passed"):
+        raise FrameworkError(
+            "cannot seal experiment with failed preflight"
+        )
+
+    manifest = build_manifest(path)
+    write_immutable_json(path / "manifest.json", manifest)
+
+    atomic_write_text(
+        path / "README.md",
+        generate_prepared_readme(path),
+    )
+
+    errors = validate_experiment(path)
+    if errors:
+        transition(
+            path,
+            "FAILED",
+            failure={
+                "stage": "sealing",
+                "message": "; ".join(errors),
+                "run_id": None,
+            },
+        )
+        raise FrameworkError(
+            "experiment failed validation before READY: "
+            + "; ".join(errors)
+        )
+
+    transition(path, "READY")
+
+    append_log(
+        path / "logs" / "framework.log",
+        f"{utc_rfc3339()} manifest sealed; experiment READY",
+    )
+
+    print(f"experiment: {args.experiment_id}")
+    print("state:      READY")
+    print("manifest:   manifest.json")
     return 0
 
 
@@ -209,6 +427,14 @@ def command_validate(args: argparse.Namespace) -> int:
 
 def command_attempt(args: argparse.Namespace) -> int:
     path = ensure_experiment_exists(args.experiment_id)
+    state = load_state(path)
+
+    if state["state"] not in {"READY", "RUNNING"}:
+        raise FrameworkError(
+            "attempt allocation requires READY or RUNNING state; "
+            f"current state is {state['state']}"
+        )
+
     schedule = read_json(path / "execution" / "schedule.json")
 
     run_ids = {run["run_id"] for run in schedule["runs"]}
@@ -266,11 +492,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(example: --param 'payload_bytes=[1024,16384]')"
         ),
     )
-    create.add_argument(
-        "--repetitions",
-        type=int,
-        default=1,
-    )
+    create.add_argument("--repetitions", type=int, default=1)
     create.add_argument(
         "--comparison-mode",
         choices=["single", "fixed", "paired-balanced", "randomized"],
@@ -285,6 +507,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan.add_argument("experiment_id")
     plan.set_defaults(func=command_plan)
+
+    prepare = subparsers.add_parser(
+        "prepare",
+        help=(
+            "collect environment/provenance and execute preparation "
+            "preflight checks"
+        ),
+    )
+    prepare.add_argument("experiment_id")
+    prepare.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="additional Git source to record",
+    )
+    prepare.add_argument(
+        "--binary",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="runtime binary/artifact to fingerprint",
+    )
+    prepare.add_argument(
+        "--preflight",
+        action="append",
+        default=[],
+        metavar="NAME=COMMAND",
+        help="additional preparation/preflight command",
+    )
+    prepare.set_defaults(func=command_prepare)
+
+    seal = subparsers.add_parser(
+        "seal",
+        help="create immutable manifest and transition PREPARING -> READY",
+    )
+    seal.add_argument("experiment_id")
+    seal.set_defaults(func=command_seal)
 
     status = subparsers.add_parser(
         "status",

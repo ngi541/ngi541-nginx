@@ -2,43 +2,37 @@
 
 This directory implements the portable R5 experiment framework.
 
-The core is intentionally Python 3 standard-library only.
+The core is Python 3 standard-library only.
 
-## R5.2 scope
+## Implemented through R5.3
 
-R5.2 implements:
+The framework currently provides:
 
 - experiment ID generation;
 - common experiment directory generation;
 - immutable request capture;
 - atomic lifecycle-state persistence;
-- transition rules;
 - common request resolution;
 - deterministic parameter-matrix expansion;
-- balanced A/B schedule generation;
-- randomized schedule generation with a recorded seed;
-- append-only attempt-directory allocation;
-- structural experiment validation;
-- a stable shell entry point;
-- standard-library unit tests.
+- balanced A/B scheduling;
+- append-only attempt allocation;
+- local environment adapter;
+- normalized local system/CPU/memory/network inventory;
+- Git source provenance;
+- tool/dependency discovery;
+- optional binary SHA-256 fingerprinting;
+- preparation preflight hooks;
+- manifest generation and sealing;
+- `PREPARING -> READY` transition;
+- generated prepared-experiment README;
+- structural validation;
+- Python standard-library unit tests.
 
-R5.2 does **not** yet execute NGINX, collect DUT inventory, build NGI541, produce performance measurements, analyze results, or promote evidence.
+R5.3 still does **not** execute measured HTTP/3 workloads or analyze benchmark results.
 
-Those functions are intentionally layered on top of this core.
+## User-facing flow
 
-## Entry point
-
-Use:
-
-```bash
-./scripts/experiment.sh
-```
-
-The shell wrapper only locates the repository and invokes the Python core.
-
-## Create an experiment
-
-Example:
+Create:
 
 ```bash
 ./scripts/experiment.sh create \
@@ -48,146 +42,184 @@ Example:
   --variant ngi541-direct \
   --repetitions 5 \
   --param 'payload_bytes=[1024,16384]' \
-  --param 'workers=[1,2,4]' \
-  --param 'clients=[1,8,16]'
+  --param 'workers=[2]' \
+  --param 'clients=[16]'
 ```
 
-The command prints the generated experiment ID and path.
-
-Creation produces the common filesystem ABI, preserves `config/request.json`, creates `state.json`, and enters `PREPARING`.
-
-## Generate the execution plan
+Plan:
 
 ```bash
 ./scripts/experiment.sh plan <experiment-id>
 ```
 
-The plan command:
-
-1. validates `request.json`;
-2. resolves common defaults;
-3. writes immutable `config/resolved.json`;
-4. expands list-valued parameters as matrix axes;
-5. generates immutable `execution/schedule.json`;
-6. records the planned run count in `state.json`.
-
-The experiment remains in `PREPARING`.
-
-A later preparation layer must collect environment/provenance data and pass correctness gates before the experiment can transition to `READY`.
-
-## Parameter convention
-
-For the R5 core:
-
-- scalar parameter values are fixed across the experiment;
-- list parameter values are matrix axes;
-- `repetitions` is a positive integer and is not a matrix axis.
-
-Matrix axis names are sorted before Cartesian expansion so the generated schedule is deterministic from the resolved request.
-
-## Comparison modes
-
-Supported modes:
-
-```text
-single
-fixed
-paired-balanced
-randomized
-```
-
-Default selection:
-
-- one variant → `single`;
-- two variants → `paired-balanced`;
-- more than two variants → `fixed`.
-
-`paired-balanced` requires exactly two variants and alternates order by comparison group:
-
-```text
-pair 1: A → B
-pair 2: B → A
-pair 3: A → B
-```
-
-`randomized` uses a recorded integer seed. If no seed is provided, R5.2 resolves the seed to `0` to preserve deterministic behavior.
-
-## Inspect state
+Prepare:
 
 ```bash
-./scripts/experiment.sh status <experiment-id>
+./scripts/experiment.sh prepare <experiment-id>
 ```
 
-or:
+R5.3 automatically records the `ngi541-nginx` Git repository and, when present as a sibling Git work tree, `../ngi541`.
+
+Additional sources may be supplied:
 
 ```bash
-./scripts/experiment.sh status <experiment-id> --json
+./scripts/experiment.sh prepare <experiment-id> \
+  --source custom-source=/path/to/source
 ```
 
-## Validate structure
+Runtime artifacts may be fingerprinted:
 
 ```bash
-./scripts/experiment.sh validate <experiment-id>
+./scripts/experiment.sh prepare <experiment-id> \
+  --binary stock-nginx=/path/to/stock/nginx \
+  --binary ngi541-nginx=/path/to/ngi541/nginx
 ```
 
-The built-in validator is standard-library only. It checks core invariants without requiring a third-party JSON Schema implementation.
-
-The formal schemas remain under:
-
-```text
-benchmark/framework/schemas/
-```
-
-## Allocate a raw attempt
-
-Future workload runners use:
+Additional correctness or preparation checks may be executed:
 
 ```bash
-./scripts/experiment.sh allocate-attempt \
-  <experiment-id> \
-  run-0001
+./scripts/experiment.sh prepare <experiment-id> \
+  --preflight 'core-tests=./path/to/test-command' \
+  --preflight 'integration-tests=./scripts/test.sh'
 ```
 
-The first allocation creates:
+Each custom preflight command gets persistent stdout/stderr logs under:
 
 ```text
-raw/runs/run-0001/attempt-01/
+provenance/preflight/
 ```
 
-A second allocation creates:
+A failed preflight transitions the experiment to `FAILED` and preserves all preparation artifacts collected so far.
+
+After correcting the problem, running `prepare` again resumes through:
 
 ```text
-raw/runs/run-0001/attempt-02/
+FAILED -> PREPARING
 ```
 
-Existing attempts are never overwritten.
-
-## Lifecycle boundary
-
-R5.2 deliberately stops after common planning.
-
-The next implementation layer must provide:
-
-```text
-environment adapter
-DUT inventory
-source/dependency provenance
-build/runtime identity
-correctness preflight
-manifest sealing
-READY transition
-```
-
-Only after that boundary may measured workload execution begin.
-
-## Tests
-
-Run:
+Seal:
 
 ```bash
-python3 -m unittest discover \
-  -s benchmark/framework/tests \
-  -v
+./scripts/experiment.sh seal <experiment-id>
 ```
 
-The tests use only the Python standard library.
+Sealing requires passing preflight and all required preparation records.
+
+It creates:
+
+```text
+manifest.json
+README.md
+```
+
+and transitions:
+
+```text
+PREPARING -> READY
+```
+
+At `READY`, configuration, environment, provenance, schedule, and manifest records become the immutable pre-run experiment identity.
+
+## Local adapter
+
+The R5.3 local adapter produces:
+
+```text
+environment/adapter.json
+environment/nodes/host/system.json
+environment/nodes/host/cpu.json
+environment/nodes/host/memory.json
+environment/nodes/host/network.json
+```
+
+The local topology is:
+
+```text
+T0
+host:
+  load-generator
+  dut
+```
+
+Linux and macOS use different discovery mechanisms but emit the same normalized file layout.
+
+## Source provenance
+
+`provenance/sources.json` records Git identity including:
+
+- commit;
+- branch;
+- describe result;
+- origin remote when available;
+- dirty state;
+- tracked-diff SHA-256;
+- relevant untracked filenames.
+
+Generated experiment directories and Python bytecode are excluded from the relevant-untracked calculation.
+
+A dirty source is recorded but does not automatically prevent an experimental run at R5.3.
+
+Later evidence-promotion policy may require clean sources for accepted evidence.
+
+## Dependencies
+
+`provenance/dependencies.json` probes common tools when available:
+
+```text
+python3
+git
+curl
+cmake
+clang
+openssl
+```
+
+It also records pinned values from:
+
+```text
+integration/versions/versions.env
+```
+
+when present.
+
+## Binary fingerprints
+
+Every `--binary NAME=PATH` artifact is hashed with SHA-256.
+
+The canonical textual fingerprint file is:
+
+```text
+provenance/binaries.sha256
+```
+
+Additional binary metadata is recorded in:
+
+```text
+provenance/build.json
+```
+
+Absolute host paths are not emitted into the experiment metadata.
+
+## Preparation versus sealing
+
+Preparation remains mutable because a failed preparation may be retried.
+
+Sealing is the boundary that makes pre-run experiment identity immutable.
+
+This separation is deliberate:
+
+```text
+PREPARING
+  collect / retry / correct
+      ↓
+seal
+      ↓
+READY
+  immutable pre-run identity
+```
+
+## Next layer
+
+The next framework layer adds workload execution.
+
+For HTTP/3 this will consume the immutable schedule, launch the selected variant, perform warmup and measured client execution, write `measurement.json` for every attempt, and preserve stdout/stderr without changing the R5 experiment ABI.
