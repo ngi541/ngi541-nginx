@@ -27,43 +27,36 @@ fail()
     || fail "missing patch: $PATCH"
 
 
-#
-# Fresh source tree.
-#
-
 if patch \
     --dry-run \
-    --silent \
+    --batch \
+    --forward \
     -p1 \
     -d "$NGINX_SRC" \
-    < "$PATCH"
+    < "$PATCH" \
+    >/dev/null 2>&1
 then
     patch \
+        --batch \
+        --forward \
         -p1 \
         -d "$NGINX_SRC" \
         < "$PATCH"
 
-    echo "PASS: NGI541 NGINX patch applied"
-    exit 0
-fi
+    echo "PASS: NGINX integration patch applied"
 
-
-#
-# Allow build.sh to be executed again when the exact patch
-# is already present.
-#
-
-if patch \
+elif patch \
     --dry-run \
-    --silent \
-    -R \
+    --batch \
+    --reverse \
     -p1 \
     -d "$NGINX_SRC" \
-    < "$PATCH"
+    < "$PATCH" \
+    >/dev/null 2>&1
 then
-    echo "PASS: NGI541 NGINX patch already applied"
-    exit 0
+    echo "PASS: NGINX integration patch already applied"
+
+else
+    fail \
+        "NGINX integration patch neither applies cleanly nor matches the already-applied state"
 fi
-
-
-fail "NGI541 patch cannot be applied cleanly"
