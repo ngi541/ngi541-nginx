@@ -1,25 +1,30 @@
 from __future__ import annotations
 
 import hashlib
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from framework.ids import validate_slug, utc_rfc3339
-from framework.io_utils import FrameworkError, atomic_write_json, atomic_write_text
+from framework.io_utils import (
+    FrameworkError,
+    atomic_write_json,
+    atomic_write_text,
+)
 
 
 def _run(
     argv: list[str],
     *,
     cwd: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             argv,
             cwd=cwd,
+            env=env,
             check=False,
             text=True,
             capture_output=True,
@@ -55,6 +60,30 @@ def _relative_location(path: Path, repo_root: Path) -> str | None:
         return None
 
 
+def resolve_recorded_location(
+    location: str | None,
+    repo_root: Path,
+) -> Path:
+    if location is None:
+        raise FrameworkError(
+            "artifact has no portable recorded location; "
+            "local execution requires an artifact below the repository "
+            "or its parent directory"
+        )
+
+    path = (repo_root / location).resolve()
+    parent = repo_root.resolve().parent
+
+    try:
+        path.relative_to(parent)
+    except ValueError as exc:
+        raise FrameworkError(
+            f"recorded artifact escapes repository parent: {location}"
+        ) from exc
+
+    return path
+
+
 def _git_diff_sha256(path: Path) -> str:
     chunks: list[bytes] = []
 
@@ -79,10 +108,12 @@ def git_source_info(
     path: Path,
     repo_root: Path,
 ) -> dict[str, Any]:
-    if not (path / ".git").exists():
-        inside = _run_ok(["git", "rev-parse", "--is-inside-work-tree"], cwd=path)
-        if inside != "true":
-            raise FrameworkError(f"source is not a Git work tree: {path}")
+    inside = _run_ok(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=path,
+    )
+    if inside != "true":
+        raise FrameworkError(f"source is not a Git work tree: {path}")
 
     commit = _run_ok(["git", "rev-parse", "HEAD"], cwd=path)
     if not commit:
@@ -122,7 +153,6 @@ def git_source_info(
         ]
 
     tracked_dirty = bool(tracked_status)
-    untracked_relevant = bool(untracked_files)
 
     return {
         "name": name,
@@ -131,8 +161,12 @@ def git_source_info(
         "describe": describe,
         "remote": remote,
         "location": _relative_location(path, repo_root),
-        "dirty": tracked_dirty or untracked_relevant,
+        # "dirty" means tracked source state differs from HEAD.
+        # Untracked files are preserved separately because build/install
+        # artifacts should not silently turn a clean source revision dirty.
+        "dirty": tracked_dirty,
         "tracked_dirty": tracked_dirty,
+        "untracked_present": bool(untracked_files),
         "untracked_relevant": untracked_files,
         "tracked_diff_sha256": _git_diff_sha256(path),
     }
@@ -205,7 +239,6 @@ def discover_sources(
 
 
 def _probe_version(
-    name: str,
     candidates: list[list[str]],
 ) -> dict[str, Any]:
     for argv in candidates:
@@ -224,11 +257,9 @@ def _probe_version(
         output = (result.stdout or result.stderr).strip()
         first_line = output.splitlines()[0] if output else None
 
-        recorded_command = [Path(argv[0]).name, *argv[1:]]
-
         return {
             "available": result.returncode == 0,
-            "command": recorded_command,
+            "command": resolved,
             "version": first_line,
         }
 
@@ -268,12 +299,12 @@ def discover_dependencies(repo_root: Path) -> dict[str, Any]:
     curl_candidates.append(["curl", "--version"])
 
     tools = {
-        "python3": _probe_version("python3", [["python3", "--version"]]),
-        "git": _probe_version("git", [["git", "--version"]]),
-        "curl": _probe_version("curl", curl_candidates),
-        "cmake": _probe_version("cmake", [["cmake", "--version"]]),
-        "clang": _probe_version("clang", [["clang", "--version"]]),
-        "openssl": _probe_version("openssl", [["openssl", "version"]]),
+        "python3": _probe_version([["python3", "--version"]]),
+        "git": _probe_version([["git", "--version"]]),
+        "curl": _probe_version(curl_candidates),
+        "cmake": _probe_version([["cmake", "--version"]]),
+        "clang": _probe_version([["clang", "--version"]]),
+        "openssl": _probe_version([["openssl", "version"]]),
     }
 
     pinned = _parse_versions_env(
@@ -298,6 +329,36 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _artifact_record(
+    name: str,
+    path: Path,
+    repo_root: Path,
+) -> dict[str, Any]:
+    requested = path.expanduser().absolute()
+    resolved = requested.resolve()
+
+    if not resolved.is_file():
+        raise FrameworkError(f"artifact does not exist: {path}")
+
+    # Preserve the user-visible leaf name even when PATH is a symlink.
+    # Runtime loaders often depend on that exact SONAME/install-name alias
+    # (for example libngi541_engine.0.1.dylib -> .0.1.1.dylib).
+    #
+    # Hashing still follows the symlink and fingerprints the target bytes.
+    location = _relative_location(requested.parent, repo_root)
+    if location is not None:
+        location = str(Path(location) / requested.name)
+
+    return {
+        "name": name,
+        "sha256": sha256_file(resolved),
+        "location": location,
+        "basename": requested.name,
+        "resolved_basename": resolved.name,
+        "size_bytes": resolved.stat().st_size,
+    }
+
+
 def record_binaries(
     repo_root: Path,
     binary_specs: list[str],
@@ -308,26 +369,11 @@ def record_binaries(
 
     for spec in binary_specs:
         name, path = parse_named_path(spec)
-        resolved = path.resolve()
-
-        if not resolved.is_file():
-            raise FrameworkError(
-                f"binary artifact does not exist: {path}"
-            )
-
-        digest = sha256_file(resolved)
-        location = _relative_location(resolved, repo_root)
-
-        rows.append(
-            {
-                "name": name,
-                "sha256": digest,
-                "location": location,
-                "basename": resolved.name,
-                "size_bytes": resolved.stat().st_size,
-            }
+        record = _artifact_record(name, path, repo_root)
+        rows.append(record)
+        lines.append(
+            f"{record['sha256']}  {name}:{record['basename']}"
         )
-        lines.append(f"{digest}  {name}:{resolved.name}")
 
     atomic_write_text(
         output,
@@ -340,18 +386,85 @@ def record_binaries(
     }
 
 
-def record_build(
+def record_runtime_bindings(
     repo_root: Path,
+    variants: list[str],
     binary_records: dict[str, Any],
+    library_specs: list[str],
+) -> dict[str, Any]:
+    binaries = {
+        item["name"]: item
+        for item in binary_records.get("artifacts", [])
+    }
+
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "variants": {},
+    }
+
+    for variant in variants:
+        if variant not in binaries:
+            raise FrameworkError(
+                f"missing --binary binding for variant: {variant}"
+            )
+
+        if binaries[variant].get("location") is None:
+            raise FrameworkError(
+                f"variant binary {variant!r} is outside the portable "
+                "repository-parent boundary"
+            )
+
+        result["variants"][variant] = {
+            "binary": binaries[variant],
+            "libraries": [],
+        }
+
+    for spec in library_specs:
+        variant, path = parse_named_path(spec)
+
+        if variant not in result["variants"]:
+            raise FrameworkError(
+                f"runtime library references unknown variant: {variant}"
+            )
+
+        record = _artifact_record(
+            f"{variant}-library",
+            path,
+            repo_root,
+        )
+        if record.get("location") is None:
+            raise FrameworkError(
+                f"runtime library for {variant!r} is outside the portable "
+                "repository-parent boundary"
+            )
+
+        result["variants"][variant]["libraries"].append(record)
+
+    return result
+
+
+def record_build(
+    binary_records: dict[str, Any],
+    runtime_bindings: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "collected_at": utc_rfc3339(),
         "build_performed_by_framework": False,
         "binary_artifacts": binary_records["artifacts"],
+        "runtime_bindings": {
+            variant: {
+                "binary_sha256": binding["binary"]["sha256"],
+                "library_sha256": [
+                    library["sha256"]
+                    for library in binding["libraries"]
+                ],
+            }
+            for variant, binding in runtime_bindings["variants"].items()
+        },
         "note": (
-            "R5.3 records supplied runtime artifacts. "
-            "Workload-specific build automation is layered above this core."
+            "R5.4 executes only sealed runtime artifacts whose hashes "
+            "match the preparation provenance."
         ),
     }
 
@@ -379,6 +492,25 @@ def run_preflight(
             "name": "schedule-present",
             "kind": "builtin",
             "passed": (experiment_dir / "execution" / "schedule.json").is_file(),
+        },
+        {
+            "name": "runtime-bindings-present",
+            "kind": "builtin",
+            "passed": (
+                experiment_dir
+                / "provenance"
+                / "runtime-bindings.json"
+            ).is_file(),
+        },
+        {
+            "name": "workload-prepared",
+            "kind": "builtin",
+            "passed": (
+                experiment_dir
+                / "execution"
+                / "workload"
+                / "manifest.json"
+            ).is_file(),
         },
     ]
 

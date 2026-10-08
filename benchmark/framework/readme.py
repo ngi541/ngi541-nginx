@@ -9,6 +9,9 @@ def generate_prepared_readme(experiment_dir: Path) -> str:
     manifest = read_json(experiment_dir / "manifest.json")
     schedule = read_json(experiment_dir / "execution" / "schedule.json")
     preflight = read_json(experiment_dir / "provenance" / "preflight.json")
+    workload = read_json(
+        experiment_dir / "execution" / "workload" / "manifest.json"
+    )
 
     exp = manifest["experiment"]
     topology = manifest["topology"]
@@ -28,9 +31,20 @@ def generate_prepared_readme(experiment_dir: Path) -> str:
         if dirty
     ]
 
-    dirty_note = "none"
-    if dirty_sources:
-        dirty_note = ", ".join(dirty_sources)
+    untracked_sources = [
+        name
+        for name, present in manifest
+        .get("extensions", {})
+        .get("source_untracked_present", {})
+        .items()
+        if present
+    ]
+
+    dirty_note = ", ".join(dirty_sources) if dirty_sources else "none"
+    untracked_note = (
+        ", ".join(untracked_sources)
+        if untracked_sources else "none"
+    )
 
     return f"""# {exp["id"]}
 
@@ -47,7 +61,17 @@ planned runs: {len(schedule["runs"])}
 comparison mode: {schedule["comparison_mode"]}
 variants: {", ".join(variants)}
 preflight: {"PASS" if preflight["passed"] else "FAIL"}
-dirty recorded sources: {dirty_note}
+tracked-dirty sources: {dirty_note}
+sources with untracked files: {untracked_note}
+```
+
+## HTTP/3 workload
+
+```text
+transport: {workload["transport"]}
+application protocol: {workload["application_protocol"]}
+cipher suite: {workload["cipher_suite"]}
+endpoint: {workload["server"]["host"]}:{workload["server"]["port"]}
 ```
 
 ## Canonical records
@@ -59,16 +83,19 @@ config/resolved.json
 environment/
 provenance/
 execution/schedule.json
+execution/workload/
 state.json
 ```
 
-Raw measurements will be appended below:
+Measured runs are appended below:
 
 ```text
 raw/runs/
 ```
 
+Each attempt preserves `measurement.json`, client logs, server logs, and the generated NGINX configuration.
+
 Processed outputs and figures are derived artifacts and are generated after measured execution.
 
-This README is generated from the experiment metadata and may be regenerated.
+This README is generated from experiment metadata and may be regenerated.
 """

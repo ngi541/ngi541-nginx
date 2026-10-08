@@ -39,6 +39,7 @@ from framework.provenance import (
     discover_sources,
     record_binaries,
     record_build,
+    record_runtime_bindings,
     run_preflight,
 )
 from framework.readme import generate_prepared_readme
@@ -47,6 +48,11 @@ from framework.validation import (
     COMMON_DIRS,
     validate_experiment,
     validate_request,
+)
+from framework.workloads import (
+    execute_workload,
+    prepare_workload,
+    resolve_workload_config,
 )
 
 
@@ -169,6 +175,7 @@ def command_plan(args: argparse.Namespace) -> int:
     validate_request(request)
 
     resolved = resolve_common_request(request)
+    resolved = resolve_workload_config(request, resolved)
     schedule = build_schedule(args.experiment_id, resolved)
 
     write_immutable_json(
@@ -199,12 +206,17 @@ def _ensure_preparing(path: Path) -> None:
     state = load_state(path)
 
     if state["state"] == "FAILED":
+        if state.get("failure", {}).get("stage") != "preparing":
+            raise FrameworkError(
+                "prepare can resume only a FAILED preparation; "
+                "this experiment failed during another stage"
+            )
         transition(path, "PREPARING")
         return
 
     if state["state"] != "PREPARING":
         raise FrameworkError(
-            "prepare requires PREPARING or FAILED state; "
+            "prepare requires PREPARING or preparation-FAILED state; "
             f"current state is {state['state']}"
         )
 
@@ -224,6 +236,7 @@ def command_prepare(args: argparse.Namespace) -> int:
         )
 
     request = read_json(path / "config" / "request.json")
+    resolved = read_json(path / "config" / "resolved.json")
 
     try:
         adapter = prepare_environment(
@@ -243,15 +256,21 @@ def command_prepare(args: argparse.Namespace) -> int:
             path / "provenance" / "binaries.sha256",
         )
 
-        build = record_build(
+        runtime_bindings = record_runtime_bindings(
             REPO_ROOT,
+            resolved["variants"],
             binaries,
+            args.runtime_library,
         )
 
-        preflight = run_preflight(
-            path,
-            REPO_ROOT,
-            args.preflight,
+        atomic_write_json(
+            path / "provenance" / "runtime-bindings.json",
+            runtime_bindings,
+        )
+
+        build = record_build(
+            binaries,
+            runtime_bindings,
         )
 
         atomic_write_json(
@@ -266,6 +285,20 @@ def command_prepare(args: argparse.Namespace) -> int:
             path / "provenance" / "build.json",
             build,
         )
+
+        prepare_workload(
+            path,
+            resolved,
+            dependencies,
+            runtime_bindings,
+        )
+
+        preflight = run_preflight(
+            path,
+            REPO_ROOT,
+            args.preflight,
+        )
+
         atomic_write_json(
             path / "provenance" / "preflight.json",
             preflight,
@@ -302,6 +335,7 @@ def command_prepare(args: argparse.Namespace) -> int:
     print(f"environment: {adapter['adapter']}")
     print(f"sources:     {len(sources['sources'])}")
     print(f"binaries:    {len(binaries['artifacts'])}")
+    print("workload:    PASS")
     print("preflight:   PASS")
     print("state:       PREPARING")
     return 0
@@ -324,8 +358,11 @@ def command_seal(args: argparse.Namespace) -> int:
         "provenance/dependencies.json",
         "provenance/build.json",
         "provenance/binaries.sha256",
+        "provenance/runtime-bindings.json",
         "provenance/preflight.json",
         "execution/schedule.json",
+        "execution/workload/manifest.json",
+        "execution/workload/preflight.json",
     )
 
     missing = [
@@ -340,13 +377,23 @@ def command_seal(args: argparse.Namespace) -> int:
         )
 
     preflight = read_json(path / "provenance" / "preflight.json")
+    workload_preflight = read_json(
+        path / "execution" / "workload" / "preflight.json"
+    )
+
     if not preflight.get("passed"):
         raise FrameworkError(
-            "cannot seal experiment with failed preflight"
+            "cannot seal experiment with failed generic preflight"
+        )
+    if not workload_preflight.get("passed"):
+        raise FrameworkError(
+            "cannot seal experiment with failed workload preflight"
         )
 
     manifest = build_manifest(path)
     write_immutable_json(path / "manifest.json", manifest)
+
+    transition(path, "READY")
 
     atomic_write_text(
         path / "README.md",
@@ -355,21 +402,10 @@ def command_seal(args: argparse.Namespace) -> int:
 
     errors = validate_experiment(path)
     if errors:
-        transition(
-            path,
-            "FAILED",
-            failure={
-                "stage": "sealing",
-                "message": "; ".join(errors),
-                "run_id": None,
-            },
-        )
         raise FrameworkError(
-            "experiment failed validation before READY: "
+            "sealed experiment failed validation: "
             + "; ".join(errors)
         )
-
-    transition(path, "READY")
 
     append_log(
         path / "logs" / "framework.log",
@@ -379,6 +415,28 @@ def command_seal(args: argparse.Namespace) -> int:
     print(f"experiment: {args.experiment_id}")
     print("state:      READY")
     print("manifest:   manifest.json")
+    return 0
+
+
+def command_execute(args: argparse.Namespace) -> int:
+    path = ensure_experiment_exists(args.experiment_id)
+
+    try:
+        execute_workload(path)
+    except KeyboardInterrupt:
+        print("ABORTED: execution interrupted", file=sys.stderr)
+        return 130
+
+    state = load_state(path)
+    print(f"experiment: {args.experiment_id}")
+    print(f"state:      {state['state']}")
+    print(
+        "runs:       "
+        f"planned={state['runs']['planned']} "
+        f"completed={state['runs']['completed']} "
+        f"failed={state['runs']['failed']} "
+        f"skipped={state['runs']['skipped']}"
+    )
     return 0
 
 
@@ -503,17 +561,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = subparsers.add_parser(
         "plan",
-        help="resolve common configuration and generate immutable run schedule",
+        help="resolve workload configuration and generate immutable schedule",
     )
     plan.add_argument("experiment_id")
     plan.set_defaults(func=command_plan)
 
     prepare = subparsers.add_parser(
         "prepare",
-        help=(
-            "collect environment/provenance and execute preparation "
-            "preflight checks"
-        ),
+        help="collect environment/provenance and prepare workload inputs",
     )
     prepare.add_argument("experiment_id")
     prepare.add_argument(
@@ -527,8 +582,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--binary",
         action="append",
         default=[],
-        metavar="NAME=PATH",
-        help="runtime binary/artifact to fingerprint",
+        metavar="VARIANT=PATH",
+        help=(
+            "runtime executable for a variant; every experiment variant "
+            "must have exactly one binding"
+        ),
+    )
+    prepare.add_argument(
+        "--runtime-library",
+        action="append",
+        default=[],
+        metavar="VARIANT=PATH",
+        help=(
+            "runtime shared library for a variant; repeat when several "
+            "library files must be staged"
+        ),
     )
     prepare.add_argument(
         "--preflight",
@@ -545,6 +613,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     seal.add_argument("experiment_id")
     seal.set_defaults(func=command_seal)
+
+    execute = subparsers.add_parser(
+        "execute",
+        help="execute or resume the immutable workload schedule",
+    )
+    execute.add_argument("experiment_id")
+    execute.set_defaults(func=command_execute)
 
     status = subparsers.add_parser(
         "status",

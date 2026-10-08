@@ -194,6 +194,7 @@
         "dependencies",
         "build",
         "binaries",
+        "runtime_bindings",
         "preflight"
       ],
       "properties": {
@@ -211,6 +212,9 @@
         },
         "preflight": {
           "const": "provenance/preflight.json"
+        },
+        "runtime_bindings": {
+          "const": "provenance/runtime-bindings.json"
         }
       },
       "additionalProperties": false

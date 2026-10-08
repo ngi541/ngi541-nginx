@@ -1,38 +1,46 @@
 # Experiment framework core
 
-This directory implements the portable R5 experiment framework.
+The R5 framework provides a portable, standard-library-only lifecycle for reproducible NGI541 network-data-path experiments.
 
-The core is Python 3 standard-library only.
+## Implemented through R5.4
 
-## Implemented through R5.3
+Current functionality includes:
 
-The framework currently provides:
+```text
+create
+plan
+prepare
+seal
+execute
+status
+validate
+```
 
-- experiment ID generation;
-- common experiment directory generation;
-- immutable request capture;
-- atomic lifecycle-state persistence;
-- common request resolution;
-- deterministic parameter-matrix expansion;
-- balanced A/B scheduling;
-- append-only attempt allocation;
-- local environment adapter;
-- normalized local system/CPU/memory/network inventory;
-- Git source provenance;
-- tool/dependency discovery;
-- optional binary SHA-256 fingerprinting;
-- preparation preflight hooks;
-- manifest generation and sealing;
-- `PREPARING -> READY` transition;
-- generated prepared-experiment README;
-- structural validation;
-- Python standard-library unit tests.
+R5.4 adds the first measured workload adapter: NGINX HTTP/3.
 
-R5.3 still does **not** execute measured HTTP/3 workloads or analyze benchmark results.
+The successful lifecycle is now:
 
-## User-facing flow
+```text
+CREATED
+  ↓
+PREPARING
+  ↓ plan
+PREPARING
+  ↓ prepare
+PREPARING
+  ↓ seal
+READY
+  ↓ execute
+RUNNING
+  ↓ all scheduled runs valid
+ANALYZING
+```
 
-Create:
+R5.5 will implement generic statistical analysis, CSV/JSON summaries, dependency-free SVG rendering, generated result README content, and the `ANALYZING -> COMPLETE` transition.
+
+## HTTP/3 example
+
+Create a small smoke experiment:
 
 ```bash
 ./scripts/experiment.sh create \
@@ -40,10 +48,12 @@ Create:
   --environment local \
   --variant stock \
   --variant ngi541-direct \
-  --repetitions 5 \
-  --param 'payload_bytes=[1024,16384]' \
-  --param 'workers=[2]' \
-  --param 'clients=[16]'
+  --repetitions 1 \
+  --param 'payload_bytes=[16384]' \
+  --param 'workers=[1]' \
+  --param 'clients=[2]' \
+  --param 'requests_per_client=100' \
+  --param 'warmup_requests_per_client=5'
 ```
 
 Plan:
@@ -52,50 +62,16 @@ Plan:
 ./scripts/experiment.sh plan <experiment-id>
 ```
 
-Prepare:
-
-```bash
-./scripts/experiment.sh prepare <experiment-id>
-```
-
-R5.3 automatically records the `ngi541-nginx` Git repository and, when present as a sibling Git work tree, `../ngi541`.
-
-Additional sources may be supplied:
+Prepare with exact runtime artifacts:
 
 ```bash
 ./scripts/experiment.sh prepare <experiment-id> \
-  --source custom-source=/path/to/source
+  --binary stock=/path/to/stock/nginx \
+  --binary ngi541-direct=/path/to/ngi541/nginx \
+  --runtime-library ngi541-direct=/path/to/libngi541_engine.dylib
 ```
 
-Runtime artifacts may be fingerprinted:
-
-```bash
-./scripts/experiment.sh prepare <experiment-id> \
-  --binary stock-nginx=/path/to/stock/nginx \
-  --binary ngi541-nginx=/path/to/ngi541/nginx
-```
-
-Additional correctness or preparation checks may be executed:
-
-```bash
-./scripts/experiment.sh prepare <experiment-id> \
-  --preflight 'core-tests=./path/to/test-command' \
-  --preflight 'integration-tests=./scripts/test.sh'
-```
-
-Each custom preflight command gets persistent stdout/stderr logs under:
-
-```text
-provenance/preflight/
-```
-
-A failed preflight transitions the experiment to `FAILED` and preserves all preparation artifacts collected so far.
-
-After correcting the problem, running `prepare` again resumes through:
-
-```text
-FAILED -> PREPARING
-```
+Repeat `--runtime-library` if the runtime loader needs several versioned library files.
 
 Seal:
 
@@ -103,123 +79,39 @@ Seal:
 ./scripts/experiment.sh seal <experiment-id>
 ```
 
-Sealing requires passing preflight and all required preparation records.
+Execute:
 
-It creates:
-
-```text
-manifest.json
-README.md
+```bash
+./scripts/experiment.sh execute <experiment-id>
 ```
 
-and transitions:
+Every schedule entry produces an append-only raw measurement attempt. A successful R5.4 execution ends in `ANALYZING`.
 
-```text
-PREPARING -> READY
-```
+## Runtime artifact rule
 
-At `READY`, configuration, environment, provenance, schedule, and manifest records become the immutable pre-run experiment identity.
+Variant runtime paths are provided only during preparation.
 
-## Local adapter
+The sealed experiment stores relative artifact locations and SHA-256 identities.
 
-The R5.3 local adapter produces:
+Execution re-verifies hashes before copying those artifacts into an ephemeral per-attempt runtime directory.
 
-```text
-environment/adapter.json
-environment/nodes/host/system.json
-environment/nodes/host/cpu.json
-environment/nodes/host/memory.json
-environment/nodes/host/network.json
-```
-
-The local topology is:
-
-```text
-T0
-host:
-  load-generator
-  dut
-```
-
-Linux and macOS use different discovery mechanisms but emit the same normalized file layout.
-
-## Source provenance
-
-`provenance/sources.json` records Git identity including:
-
-- commit;
-- branch;
-- describe result;
-- origin remote when available;
-- dirty state;
-- tracked-diff SHA-256;
-- relevant untracked filenames.
-
-Generated experiment directories and Python bytecode are excluded from the relevant-untracked calculation.
-
-A dirty source is recorded but does not automatically prevent an experimental run at R5.3.
-
-Later evidence-promotion policy may require clean sources for accepted evidence.
+This prevents a later rebuild at the same filesystem path from silently changing the runtime under test.
 
 ## Dependencies
 
-`provenance/dependencies.json` probes common tools when available:
+Core framework:
 
 ```text
-python3
-git
-curl
-cmake
-clang
-openssl
+Python 3 standard library
+Git
 ```
 
-It also records pinned values from:
+HTTP/3 workload additionally requires:
 
 ```text
-integration/versions/versions.env
+NGINX with --with-http_v3_module
+curl with --http3-only, --tls13-ciphers, and --out-null
+OpenSSL-compatible certificate generation command
 ```
 
-when present.
-
-## Binary fingerprints
-
-Every `--binary NAME=PATH` artifact is hashed with SHA-256.
-
-The canonical textual fingerprint file is:
-
-```text
-provenance/binaries.sha256
-```
-
-Additional binary metadata is recorded in:
-
-```text
-provenance/build.json
-```
-
-Absolute host paths are not emitted into the experiment metadata.
-
-## Preparation versus sealing
-
-Preparation remains mutable because a failed preparation may be retried.
-
-Sealing is the boundary that makes pre-run experiment identity immutable.
-
-This separation is deliberate:
-
-```text
-PREPARING
-  collect / retry / correct
-      ↓
-seal
-      ↓
-READY
-  immutable pre-run identity
-```
-
-## Next layer
-
-The next framework layer adds workload execution.
-
-For HTTP/3 this will consume the immutable schedule, launch the selected variant, perform warmup and measured client execution, write `measurement.json` for every attempt, and preserve stdout/stderr without changing the R5 experiment ABI.
+No NumPy, pandas, matplotlib, PyYAML, or JSON-Schema runtime package is required.

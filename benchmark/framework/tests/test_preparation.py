@@ -97,6 +97,36 @@ class ProvenanceTests(unittest.TestCase):
             expected = hashlib.sha256(b"ngi541").hexdigest()
             self.assertEqual(sha256_file(path), expected)
 
+    def test_binary_record_preserves_symlink_basename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "libexample.0.1.1.dylib"
+            alias = root / "libexample.0.1.dylib"
+            target.write_bytes(b"runtime")
+            alias.symlink_to(target.name)
+
+            output = root / "binaries.sha256"
+            record = record_binaries(
+                root,
+                [f"engine={alias}"],
+                output,
+            )
+
+            artifact = record["artifacts"][0]
+            self.assertEqual(
+                artifact["basename"],
+                "libexample.0.1.dylib",
+            )
+            self.assertEqual(
+                artifact["resolved_basename"],
+                "libexample.0.1.1.dylib",
+            )
+            self.assertEqual(
+                artifact["location"],
+                "libexample.0.1.dylib",
+            )
+
+
     def test_binary_record_has_no_absolute_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

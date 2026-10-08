@@ -142,13 +142,7 @@ def validate_experiment(experiment_dir: Path) -> list[str]:
         except FrameworkError as exc:
             errors.append(str(exc))
 
-    manifest_path = experiment_dir / "manifest.json"
-    sealed_material_present = manifest_path.is_file()
-
-    if state and (
-        state.get("state") in SEALED_STATES
-        or sealed_material_present
-    ):
+    if state and state.get("state") in SEALED_STATES:
         required_files = (
             "manifest.json",
             "config/resolved.json",
@@ -157,25 +151,33 @@ def validate_experiment(experiment_dir: Path) -> list[str]:
             "provenance/dependencies.json",
             "provenance/build.json",
             "provenance/binaries.sha256",
+            "provenance/runtime-bindings.json",
             "provenance/preflight.json",
             "execution/schedule.json",
+            "execution/workload/manifest.json",
+            "execution/workload/preflight.json",
         )
 
         for rel in required_files:
             if not (experiment_dir / rel).is_file():
                 errors.append(f"sealed experiment missing file: {rel}")
 
-        preflight_path = experiment_dir / "provenance" / "preflight.json"
-        if preflight_path.is_file():
-            try:
-                preflight = read_json(preflight_path)
-                if not preflight.get("passed"):
-                    errors.append(
-                        "sealed experiment has non-passing preflight"
-                    )
-            except FrameworkError as exc:
-                errors.append(str(exc))
+        for preflight_rel in (
+            "provenance/preflight.json",
+            "execution/workload/preflight.json",
+        ):
+            path = experiment_dir / preflight_rel
+            if path.is_file():
+                try:
+                    preflight = read_json(path)
+                    if not preflight.get("passed"):
+                        errors.append(
+                            f"sealed experiment has non-passing {preflight_rel}"
+                        )
+                except FrameworkError as exc:
+                    errors.append(str(exc))
 
+        manifest_path = experiment_dir / "manifest.json"
         if manifest_path.is_file():
             try:
                 manifest = read_json(manifest_path)
@@ -188,5 +190,44 @@ def validate_experiment(experiment_dir: Path) -> list[str]:
                     )
             except FrameworkError as exc:
                 errors.append(str(exc))
+
+    if state and state.get("state") in {"ANALYZING", "COMPLETE"}:
+        schedule = None
+        try:
+            schedule = read_json(
+                experiment_dir / "execution" / "schedule.json"
+            )
+        except FrameworkError as exc:
+            errors.append(str(exc))
+
+        if schedule:
+            for run in schedule["runs"]:
+                run_dir = (
+                    experiment_dir
+                    / "raw"
+                    / "runs"
+                    / run["run_id"]
+                )
+                valid = False
+
+                if run_dir.is_dir():
+                    for measurement_path in run_dir.glob(
+                        "attempt-*/measurement.json"
+                    ):
+                        try:
+                            measurement = read_json(measurement_path)
+                            if measurement.get(
+                                "execution", {}
+                            ).get("valid") is True:
+                                valid = True
+                                break
+                        except FrameworkError:
+                            pass
+
+                if not valid:
+                    errors.append(
+                        f"completed execution missing valid measurement: "
+                        f"{run['run_id']}"
+                    )
 
     return errors

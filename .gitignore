@@ -12,3 +12,12 @@ work/
 
 __pycache__/
 *.py[cod]
+
+/build/r5.4-http3/
+
+# Experiment logs are preserved evidence
+!experiments/**/*.log
+
+# Ephemeral execution runtime:
+# copied binaries/libraries and generated TLS key/certificate
+experiments/*/execution/runtime/

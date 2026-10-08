@@ -109,15 +109,21 @@ def build_manifest(
             "dependencies": "provenance/dependencies.json",
             "build": "provenance/build.json",
             "binaries": "provenance/binaries.sha256",
+            "runtime_bindings": "provenance/runtime-bindings.json",
             "preflight": "provenance/preflight.json",
         },
         "execution": {
             "schedule": "execution/schedule.json",
         },
         "extensions": {
+            "workload": "execution/workload/manifest.json",
             "source_dirty": {
                 name: bool(record.get("dirty"))
                 for name, record in sources.get("sources", {}).items()
-            }
+            },
+            "source_untracked_present": {
+                name: bool(record.get("untracked_present"))
+                for name, record in sources.get("sources", {}).items()
+            },
         },
     }
