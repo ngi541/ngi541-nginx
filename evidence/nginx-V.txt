@@ -1,5 +1,0 @@
-nginx version: nginx/1.31.6
-built by clang 14.0.0 (clang-1400.0.29.202)
-built with OpenSSL 3.5.9 29 Sep 2026
-TLS SNI support enabled
-configure arguments: --prefix=/Users/ivanivanets/Projects/NGI541/ngi541-nginx/install/nginx --with-openssl=/Users/ivanivanets/Projects/NGI541/ngi541-nginx/src/openssl-3.5.9 --with-http_ssl_module --with-http_v3_module --with-debug --with-cc-opt='-O2 -g -I/usr/local/opt/pcre2/include' --with-ld-opt=-L/usr/local/opt/pcre2/lib
