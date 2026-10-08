@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # shellcheck disable=SC1091
-source "$ROOT/config/versions.env"
+source "$ROOT/integration/versions/versions.env"
 
 
 NGINX_SRC="$ROOT/src/nginx-${NGINX_VERSION}"
@@ -15,7 +15,7 @@ NGINX_TESTS="$ROOT/src/nginx-tests"
 NGINX_BINARY="$NGINX_SRC/objs/nginx"
 INSTALL_PREFIX="${NGINX_INSTALL_PREFIX:-$ROOT/install/nginx-ngi541}"
 
-CUSTOM_TEST_SOURCE="$ROOT/tests/nginx-tests/n2_ngi541_auth_failure.t"
+CUSTOM_TEST_SOURCE="$ROOT/integration/tests/nginx-tests/n2_ngi541_auth_failure.t"
 CUSTOM_TEST_DEST="$NGINX_TESTS/n2_ngi541_auth_failure.t"
 
 LOG_DIR="$ROOT/work/test-results"

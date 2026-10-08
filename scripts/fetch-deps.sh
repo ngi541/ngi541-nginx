@@ -4,7 +4,7 @@ set -euo pipefail
 
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSIONS="$ROOT/config/versions.env"
+VERSIONS="$ROOT/integration/versions/versions.env"
 
 if [[ ! -f "$VERSIONS" ]]; then
     echo "ERROR: missing $VERSIONS" >&2
