@@ -16,6 +16,8 @@ if str(BENCHMARK_DIR) not in sys.path:
 from framework.analysis import (
     _first_valid_measurement,
     _paired_statistics,
+    _paired_svg,
+    _requests_svg,
     _variant_statistics,
     analyze_experiment,
     validate_analysis_outputs,
@@ -82,6 +84,83 @@ class AnalysisStatisticsTests(unittest.TestCase):
         self.assertEqual(stats["wins"], 2)
         self.assertEqual(stats["losses"], 0)
         self.assertEqual(stats["ties"], 0)
+
+
+class AnalysisVisualizationTests(unittest.TestCase):
+    def test_requests_svg_uses_grouped_bars_and_workload_labels(self):
+        variant_summary = {
+            "condition-0001": {
+                "parameters": {"payload_bytes": 16384, "workers": 1, "clients": 2},
+                "variants": {
+                    "stock": {"median": 2048.7},
+                    "ngi541-direct": {"median": 2037.7},
+                },
+            }
+        }
+        key = json.dumps(
+            {"payload_bytes": 16384, "workers": 1, "clients": 2},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        catalog = {
+            key: {
+                "condition_id": "condition-0001",
+                "parameters": {"payload_bytes": 16384, "workers": 1, "clients": 2},
+            }
+        }
+        svg = _requests_svg(
+            variant_summary,
+            [key],
+            catalog,
+            ["stock", "ngi541-direct"],
+        )
+        self.assertIn("<rect", svg)
+        self.assertIn("16 KiB", svg)
+        self.assertIn("1w/2c", svg)
+        self.assertIn("Stock OpenSSL", svg)
+        self.assertIn("NGI541 direct", svg)
+        self.assertIn("Completed HTTP/3 requests/s", svg)
+
+    def test_paired_svg_aggregates_by_condition(self):
+        rows = [
+            {
+                "condition_id": "condition-0001",
+                "payload_bytes": 16384,
+                "workers": 2,
+                "clients": 16,
+                "pair_id": "pair-0001",
+                "repetition": 1,
+                "baseline_variant": "stock",
+                "candidate_variant": "ngi541-direct",
+                "baseline_requests_per_second": 100.0,
+                "candidate_requests_per_second": 105.0,
+                "ratio": 1.05,
+                "delta_percent": 5.0,
+                "winner": "candidate",
+            },
+            {
+                "condition_id": "condition-0001",
+                "payload_bytes": 16384,
+                "workers": 2,
+                "clients": 16,
+                "pair_id": "pair-0002",
+                "repetition": 2,
+                "baseline_variant": "stock",
+                "candidate_variant": "ngi541-direct",
+                "baseline_requests_per_second": 100.0,
+                "candidate_requests_per_second": 106.0,
+                "ratio": 1.06,
+                "delta_percent": 6.0,
+                "winner": "candidate",
+            },
+        ]
+        svg = _paired_svg(rows)
+        self.assertIn("NGI541 relative throughput delta", svg)
+        self.assertIn("16 KiB", svg)
+        self.assertIn("2w/16c", svg)
+        self.assertIn("+5.50%", svg)
+        self.assertIn("condition-0001 · n=2", svg)
+        self.assertNotIn(">pair-0001<", svg)
 
 
 class AttemptSelectionTests(unittest.TestCase):

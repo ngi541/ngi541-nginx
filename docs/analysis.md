@@ -62,6 +62,16 @@ delta_percent = (ratio - 1) * 100
 
 Condition-level paired statistics include mean and median delta, min/max delta, sample standard deviation of deltas, wins/losses/ties, and geometric-mean ratio when all ratios are positive.
 
+## Figures
+
+The analysis layer generates deterministic SVG figures without Matplotlib, NumPy, or another plotting dependency. Presentation is derived only from processed experiment data.
+
+`figures/requests-per-second.svg` is a grouped-bar comparison of median throughput by workload condition. Human-readable labels use payload size and worker/client topology (for example `16 KiB`, `2w/16c`); the internal condition ID is retained only as secondary metadata.
+
+`figures/paired-delta.svg` summarizes the median paired candidate-vs-baseline delta per condition around an explicit zero baseline. When a condition has multiple paired repetitions, the figure also shows the observed min/max range and individual paired samples. Positive delta means the candidate is faster than the baseline.
+
+Both figures use deterministic axis scaling, value annotations, stable variant presentation, and no timestamp or random layout state. They are presentation artifacts only; `statistics.json`, `summary.csv`, and `pairs.csv` remain the normative numeric outputs.
+
 ## Determinism and integrity
 
 Generated CSV, JSON, Markdown, and SVG files contain no current-time field. Re-running the analysis against identical raw inputs and the same analysis implementation produces byte-identical result artifacts.

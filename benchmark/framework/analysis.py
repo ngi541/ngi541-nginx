@@ -417,12 +417,108 @@ def _svg_document(width: int, height: int, body: str) -> str:
     )
 
 
-def _svg_text(x: float, y: float, text: str, *, size: int = 12, anchor: str = "start") -> str:
+def _svg_text(
+    x: float,
+    y: float,
+    text: str,
+    *,
+    size: int = 12,
+    anchor: str = "start",
+    weight: str = "normal",
+    fill: str = "#111111",
+    rotate: float | None = None,
+) -> str:
+    transform = ""
+    if rotate is not None:
+        transform = f' transform="rotate({rotate:.2f} {x:.2f} {y:.2f})"'
     return (
-        f'<text x="{x:.2f}" y="{y:.2f}" font-family="sans-serif" '
-        f'font-size="{size}" text-anchor="{anchor}" fill="black">'
-        f'{escape(text)}</text>\n'
+        f'<text x="{x:.2f}" y="{y:.2f}" font-family="Arial, Helvetica, sans-serif" '
+        f'font-size="{size}" font-weight="{weight}" text-anchor="{anchor}" '
+        f'fill="{fill}"{transform}>{escape(text)}</text>\n'
     )
+
+
+def _svg_multiline_text(
+    x: float,
+    y: float,
+    lines: list[str],
+    *,
+    size: int = 12,
+    anchor: str = "middle",
+    weight: str = "normal",
+    fill: str = "#111111",
+    line_height: float = 1.18,
+) -> str:
+    if not lines:
+        return ""
+    parts = [
+        f'<text x="{x:.2f}" y="{y:.2f}" font-family="Arial, Helvetica, sans-serif" '
+        f'font-size="{size}" font-weight="{weight}" text-anchor="{anchor}" fill="{fill}">\n'
+    ]
+    for index, line in enumerate(lines):
+        dy = "0" if index == 0 else f"{line_height:.2f}em"
+        parts.append(
+            f'<tspan x="{x:.2f}" dy="{dy}">{escape(line)}</tspan>\n'
+        )
+    parts.append('</text>\n')
+    return "".join(parts)
+
+
+def _display_variant(variant: str) -> str:
+    known = {
+        "stock": "Stock OpenSSL",
+        "ngi541-direct": "NGI541 direct",
+    }
+    return known.get(variant, variant.replace("-", " "))
+
+
+def _format_payload_bytes(value: Any) -> str:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number > 0 and number % (1024 * 1024) == 0:
+        return f"{number // (1024 * 1024)} MiB"
+    if number > 0 and number % 1024 == 0:
+        return f"{number // 1024} KiB"
+    return f"{number} B"
+
+
+def _condition_label(parameters: dict[str, Any]) -> list[str]:
+    payload = _format_payload_bytes(parameters.get("payload_bytes", "?"))
+    workers = parameters.get("workers", "?")
+    clients = parameters.get("clients", "?")
+    return [payload, f"{workers}w/{clients}c"]
+
+
+def _nice_ceiling(value: float) -> float:
+    if value <= 0:
+        return 1.0
+    exponent = math.floor(math.log10(value))
+    scale = 10.0 ** exponent
+    fraction = value / scale
+    if fraction <= 1.0:
+        nice = 1.0
+    elif fraction <= 1.2:
+        nice = 1.2
+    elif fraction <= 1.5:
+        nice = 1.5
+    elif fraction <= 2.0:
+        nice = 2.0
+    elif fraction <= 2.5:
+        nice = 2.5
+    elif fraction <= 5.0:
+        nice = 5.0
+    elif fraction <= 7.5:
+        nice = 7.5
+    else:
+        nice = 10.0
+    return nice * scale
+
+
+def _variant_fill(index: int) -> str:
+    palette = ["#2F6FA3", "#E98B2A", "#5B8C5A", "#8C6BB1"]
+    return palette[index % len(palette)]
 
 
 def _requests_svg(
@@ -431,105 +527,320 @@ def _requests_svg(
     condition_catalog: dict[str, dict[str, Any]],
     variants: list[str],
 ) -> str:
-    width, height = 1000, 520
-    left, right, top, bottom = 90.0, 40.0, 60.0, 90.0
+    width, height = 1180, 660
+    left, right, top, bottom = 105.0, 45.0, 100.0, 135.0
     plot_w = width - left - right
     plot_h = height - top - bottom
 
-    points: list[tuple[str, str, float]] = []
+    conditions: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    values: list[float] = []
     for key in condition_order:
         cid = condition_catalog[key]["condition_id"]
-        condition = variant_summary.get(cid, {})
+        summary = variant_summary.get(cid, {})
+        parameters = condition_catalog[key]["parameters"]
+        conditions.append((cid, parameters, summary))
         for variant in variants:
-            stats = condition.get("variants", {}).get(variant)
+            stats = summary.get("variants", {}).get(variant)
             if stats:
-                points.append((cid, variant, float(stats["median"])))
+                values.append(float(stats["median"]))
 
-    if not points:
-        return _svg_document(width, height, _svg_text(width / 2, height / 2, "No analyzed measurements", anchor="middle"))
+    if not values:
+        body = _svg_text(60, 40, "NGINX HTTP/3 throughput", size=22, weight="bold")
+        body += _svg_text(width / 2, height / 2, "No analyzed measurements", anchor="middle")
+        return _svg_document(width, height, body)
 
-    y_max = max(value for _, _, value in points) * 1.10
-    if y_max <= 0:
-        y_max = 1.0
+    y_max = _nice_ceiling(max(values) * 1.12)
+    tick_count = 5
+    group_count = max(1, len(conditions))
+    group_step = plot_w / group_count
+    group_inner = min(group_step * 0.70, 260.0)
+    bar_gap = 8.0
+    bar_count = max(1, len(variants))
+    bar_width = min(92.0, (group_inner - bar_gap * (bar_count - 1)) / bar_count)
+    cluster_width = bar_width * bar_count + bar_gap * (bar_count - 1)
 
-    body = _svg_text(left, 30, "Median HTTP/3 throughput by condition", size=18)
-    body += f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="black"/>\n'
-    body += f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" stroke="black"/>\n'
+    body = _svg_text(left, 38, "NGINX HTTP/3 throughput", size=24, weight="bold")
+    body += _svg_text(
+        left,
+        67,
+        "Median completed HTTP/3 requests/s by workload condition",
+        size=13,
+        fill="#555555",
+    )
 
-    for tick in range(6):
-        value = y_max * tick / 5
-        y = top + plot_h - plot_h * tick / 5
-        body += f'<line x1="{left - 4}" y1="{y:.2f}" x2="{left + plot_w}" y2="{y:.2f}" stroke="black" stroke-opacity="0.12"/>\n'
-        body += _svg_text(left - 8, y + 4, f"{value:.0f}", anchor="end")
+    # Plot frame and horizontal grid.
+    baseline_y = top + plot_h
+    for tick in range(tick_count + 1):
+        value = y_max * tick / tick_count
+        y = baseline_y - plot_h * tick / tick_count
+        body += (
+            f'<line x1="{left:.2f}" y1="{y:.2f}" x2="{left + plot_w:.2f}" y2="{y:.2f}" '
+            'stroke="#D8D8D8" stroke-width="1"/>\n'
+        )
+        body += _svg_text(left - 12, y + 4, f"{value:,.0f}", size=11, anchor="end", fill="#333333")
 
-    conditions = [condition_catalog[key]["condition_id"] for key in condition_order]
-    step = plot_w / max(1, len(conditions))
-    offsets = {
-        variant: (index - (len(variants) - 1) / 2) * min(24.0, step / max(3, len(variants) + 1))
-        for index, variant in enumerate(variants)
-    }
+    body += (
+        f'<line x1="{left:.2f}" y1="{top:.2f}" x2="{left:.2f}" y2="{baseline_y:.2f}" '
+        'stroke="#222222" stroke-width="1.4"/>\n'
+    )
+    body += (
+        f'<line x1="{left:.2f}" y1="{baseline_y:.2f}" x2="{left + plot_w:.2f}" y2="{baseline_y:.2f}" '
+        'stroke="#222222" stroke-width="1.4"/>\n'
+    )
 
-    for index, cid in enumerate(conditions):
-        x0 = left + step * (index + 0.5)
-        body += _svg_text(x0, top + plot_h + 25, cid, anchor="middle")
-        condition = variant_summary.get(cid, {})
-        for variant in variants:
-            stats = condition.get("variants", {}).get(variant)
+    # Grouped bars.
+    for condition_index, (cid, parameters, summary) in enumerate(conditions):
+        center = left + group_step * (condition_index + 0.5)
+        cluster_left = center - cluster_width / 2
+        for variant_index, variant in enumerate(variants):
+            stats = summary.get("variants", {}).get(variant)
             if not stats:
                 continue
             value = float(stats["median"])
-            x = x0 + offsets[variant]
-            y = top + plot_h - (value / y_max) * plot_h
-            body += f'<circle cx="{x:.2f}" cy="{y:.2f}" r="5" fill="black"/>\n'
-            body += _svg_text(x, y - 10, f"{value:.1f}", size=10, anchor="middle")
+            x = cluster_left + variant_index * (bar_width + bar_gap)
+            bar_h = (value / y_max) * plot_h
+            y = baseline_y - bar_h
+            fill = _variant_fill(variant_index)
+            body += (
+                f'<rect x="{x:.2f}" y="{y:.2f}" width="{bar_width:.2f}" height="{bar_h:.2f}" '
+                f'rx="2" fill="{fill}"/>\n'
+            )
+            label_y = max(top + 14, y - 8)
+            body += _svg_text(
+                x + bar_width / 2,
+                label_y,
+                f"{value:,.1f}",
+                size=11,
+                anchor="middle",
+                weight="bold",
+                fill="#222222",
+            )
 
-    legend_y = height - 25
-    legend_x = left
+        label_lines = _condition_label(parameters)
+        body += _svg_multiline_text(
+            center,
+            baseline_y + 28,
+            label_lines,
+            size=12,
+            anchor="middle",
+            weight="bold",
+        )
+        body += _svg_text(
+            center,
+            baseline_y + 64,
+            cid,
+            size=9,
+            anchor="middle",
+            fill="#777777",
+        )
+
+    # Legend.
+    legend_x = left + 10
+    legend_y = 88
     for index, variant in enumerate(variants):
-        x = legend_x + index * 220
-        body += f'<circle cx="{x:.2f}" cy="{legend_y - 4}" r="4" fill="black"/>\n'
-        body += _svg_text(x + 10, legend_y, variant, size=11)
+        x = legend_x + index * 185
+        fill = _variant_fill(index)
+        body += f'<rect x="{x:.2f}" y="{legend_y - 11:.2f}" width="16" height="12" rx="1" fill="{fill}"/>\n'
+        body += _svg_text(x + 24, legend_y, _display_variant(variant), size=11, fill="#222222")
 
-    body += _svg_text(20, top + plot_h / 2, "requests/s", size=12)
+    body += _svg_text(
+        28,
+        top + plot_h / 2,
+        "Completed HTTP/3 requests/s",
+        size=13,
+        anchor="middle",
+        weight="bold",
+        rotate=-90,
+    )
+    body += _svg_text(
+        left + plot_w / 2,
+        height - 24,
+        "Workload configuration",
+        size=13,
+        anchor="middle",
+        weight="bold",
+    )
     return _svg_document(width, height, body)
+
+
+def _delta_axis(values: list[float]) -> tuple[float, float, list[float]]:
+    low = min(values)
+    high = max(values)
+    if low >= 0:
+        upper = _nice_ceiling(max(1.0, high * 1.12))
+        lower = 0.0
+    elif high <= 0:
+        lower = -_nice_ceiling(max(1.0, abs(low) * 1.12))
+        upper = 0.0
+    else:
+        bound = _nice_ceiling(max(abs(low), abs(high)) * 1.12)
+        lower, upper = -bound, bound
+    step = (upper - lower) / 5.0
+    ticks = [lower + step * i for i in range(6)]
+    return lower, upper, ticks
 
 
 def _paired_svg(pair_rows: list[dict[str, Any]]) -> str:
-    width, height = 1000, 520
+    width, height = 1180, 660
     if not pair_rows:
-        body = _svg_text(60, 35, "Paired throughput delta", size=18)
+        body = _svg_text(60, 40, "NGI541 relative throughput delta", size=24, weight="bold")
         body += _svg_text(width / 2, height / 2, "Paired comparison not applicable", anchor="middle")
         return _svg_document(width, height, body)
 
-    left, right, top, bottom = 90.0, 40.0, 60.0, 100.0
+    left, right, top, bottom = 105.0, 45.0, 100.0, 135.0
     plot_w = width - left - right
     plot_h = height - top - bottom
-    values = [float(row["delta_percent"]) for row in pair_rows]
-    bound = max(1.0, max(abs(value) for value in values) * 1.15)
 
-    body = _svg_text(left, 30, "Paired candidate vs baseline throughput delta", size=18)
-    zero_y = top + plot_h / 2
-    body += f'<line x1="{left}" y1="{zero_y:.2f}" x2="{left + plot_w}" y2="{zero_y:.2f}" stroke="black"/>\n'
+    by_condition: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    condition_parameters: dict[str, dict[str, Any]] = {}
+    condition_order: list[str] = []
+    for row in pair_rows:
+        cid = str(row["condition_id"])
+        if cid not in by_condition:
+            condition_order.append(cid)
+        by_condition[cid].append(row)
+        condition_parameters[cid] = {
+            key: value
+            for key, value in row.items()
+            if key not in {
+                "condition_id", "pair_id", "repetition", "baseline_variant",
+                "candidate_variant", "baseline_requests_per_second",
+                "candidate_requests_per_second", "ratio", "delta_percent", "winner",
+            }
+        }
 
-    for tick in (-1.0, -0.5, 0.0, 0.5, 1.0):
-        value = bound * tick
-        y = zero_y - (value / bound) * (plot_h / 2)
-        body += f'<line x1="{left - 4}" y1="{y:.2f}" x2="{left + plot_w}" y2="{y:.2f}" stroke="black" stroke-opacity="0.12"/>\n'
-        body += _svg_text(left - 8, y + 4, f"{value:+.1f}%", anchor="end")
+    medians = [
+        float(statistics.median(float(row["delta_percent"]) for row in by_condition[cid]))
+        for cid in condition_order
+    ]
+    all_values = [float(row["delta_percent"]) for row in pair_rows]
+    y_min, y_max, ticks = _delta_axis(all_values + medians)
 
-    step = plot_w / max(1, len(pair_rows))
-    for index, row in enumerate(pair_rows):
-        value = float(row["delta_percent"])
-        x = left + step * (index + 0.5)
-        y = zero_y - (value / bound) * (plot_h / 2)
-        body += f'<line x1="{x:.2f}" y1="{zero_y:.2f}" x2="{x:.2f}" y2="{y:.2f}" stroke="black" stroke-width="3"/>\n'
-        body += f'<circle cx="{x:.2f}" cy="{y:.2f}" r="4" fill="black"/>\n'
-        body += _svg_text(x, top + plot_h + 25, str(row["pair_id"]), size=10, anchor="middle")
-        body += _svg_text(x, y - 9 if value >= 0 else y + 18, f"{value:+.2f}%", size=10, anchor="middle")
+    def y_pos(value: float) -> float:
+        if y_max == y_min:
+            return top + plot_h / 2
+        return top + (y_max - value) / (y_max - y_min) * plot_h
 
-    body += _svg_text(20, top + plot_h / 2, "delta %", size=12)
+    zero_y = y_pos(0.0)
+    group_count = max(1, len(condition_order))
+    group_step = plot_w / group_count
+    bar_width = min(125.0, group_step * 0.52)
+
+    body = _svg_text(left, 38, "NGI541 relative throughput delta", size=24, weight="bold")
+    body += _svg_text(
+        left,
+        67,
+        "Median paired delta vs Stock OpenSSL; positive values favor NGI541",
+        size=13,
+        fill="#555555",
+    )
+
+    for value in ticks:
+        y = y_pos(value)
+        line_color = "#222222" if abs(value) < 1e-12 else "#D8D8D8"
+        line_width = "1.5" if abs(value) < 1e-12 else "1"
+        body += (
+            f'<line x1="{left:.2f}" y1="{y:.2f}" x2="{left + plot_w:.2f}" y2="{y:.2f}" '
+            f'stroke="{line_color}" stroke-width="{line_width}"/>\n'
+        )
+        body += _svg_text(left - 12, y + 4, f"{value:+.1f}%", size=11, anchor="end", fill="#333333")
+
+    body += (
+        f'<line x1="{left:.2f}" y1="{top:.2f}" x2="{left:.2f}" y2="{top + plot_h:.2f}" '
+        'stroke="#222222" stroke-width="1.4"/>\n'
+    )
+
+    for index, cid in enumerate(condition_order):
+        rows = by_condition[cid]
+        values = [float(row["delta_percent"]) for row in rows]
+        median = float(statistics.median(values))
+        center = left + group_step * (index + 0.5)
+        y_med = y_pos(median)
+        rect_y = min(zero_y, y_med)
+        rect_h = max(1.0, abs(zero_y - y_med))
+
+        body += (
+            f'<rect x="{center - bar_width / 2:.2f}" y="{rect_y:.2f}" '
+            f'width="{bar_width:.2f}" height="{rect_h:.2f}" rx="2" fill="#2F6FA3"/>\n'
+        )
+
+        # Min/max range and individual pair samples provide distribution context.
+        minimum = min(values)
+        maximum = max(values)
+        y_lo = y_pos(minimum)
+        y_hi = y_pos(maximum)
+        if len(values) > 1:
+            body += (
+                f'<line x1="{center:.2f}" y1="{y_hi:.2f}" x2="{center:.2f}" y2="{y_lo:.2f}" '
+                'stroke="#222222" stroke-width="1.4"/>\n'
+            )
+            body += (
+                f'<line x1="{center - 8:.2f}" y1="{y_hi:.2f}" x2="{center + 8:.2f}" y2="{y_hi:.2f}" '
+                'stroke="#222222" stroke-width="1.4"/>\n'
+            )
+            body += (
+                f'<line x1="{center - 8:.2f}" y1="{y_lo:.2f}" x2="{center + 8:.2f}" y2="{y_lo:.2f}" '
+                'stroke="#222222" stroke-width="1.4"/>\n'
+            )
+
+        if len(values) <= 12:
+            if len(values) == 1:
+                offsets = [0.0]
+            else:
+                spread = min(38.0, bar_width * 0.55)
+                offsets = [
+                    -spread / 2 + spread * i / (len(values) - 1)
+                    for i in range(len(values))
+                ]
+            for offset, value in zip(offsets, values):
+                body += (
+                    f'<circle cx="{center + offset:.2f}" cy="{y_pos(value):.2f}" r="3.4" '
+                    'fill="white" stroke="#222222" stroke-width="1.2"/>\n'
+                )
+
+        label_y = y_med - 10 if median >= 0 else y_med + 22
+        body += _svg_text(
+            center,
+            label_y,
+            f"{median:+.2f}%",
+            size=12,
+            anchor="middle",
+            weight="bold",
+        )
+        body += _svg_multiline_text(
+            center,
+            top + plot_h + 28,
+            _condition_label(condition_parameters[cid]),
+            size=12,
+            weight="bold",
+        )
+        body += _svg_text(
+            center,
+            top + plot_h + 64,
+            f"{cid} · n={len(values)}",
+            size=9,
+            anchor="middle",
+            fill="#777777",
+        )
+
+    body += _svg_text(
+        28,
+        top + plot_h / 2,
+        "NGI541 median throughput delta (%)",
+        size=13,
+        anchor="middle",
+        weight="bold",
+        rotate=-90,
+    )
+    body += _svg_text(
+        left + plot_w / 2,
+        height - 24,
+        "Workload configuration",
+        size=13,
+        anchor="middle",
+        weight="bold",
+    )
     return _svg_document(width, height, body)
-
 
 def _results_readme(
     experiment_id: str,
