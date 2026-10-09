@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +62,54 @@ def validate_request(request: dict[str, Any]) -> None:
     if not isinstance(request["parameters"], dict):
         raise FrameworkError("parameters must be an object")
 
+    conditions = request.get("conditions")
+    if conditions is not None:
+        if not isinstance(conditions, list) or not conditions:
+            raise FrameworkError("conditions must be a non-empty array")
+
+        fixed_names = set(request["parameters"]) - {"repetitions"}
+        expected_keys = None
+        seen = set()
+
+        for index, condition in enumerate(conditions):
+            if not isinstance(condition, dict) or not condition:
+                raise FrameworkError(
+                    f"conditions[{index}] must be a non-empty object"
+                )
+
+            overlap = fixed_names.intersection(condition)
+            if overlap:
+                raise FrameworkError(
+                    "condition parameters must not overlap fixed parameters: "
+                    + ", ".join(sorted(overlap))
+                )
+
+            keys = frozenset(condition)
+            if expected_keys is None:
+                expected_keys = keys
+            elif keys != expected_keys:
+                raise FrameworkError(
+                    "all explicit conditions must use the same parameter keys"
+                )
+
+            for name, value in condition.items():
+                if isinstance(value, (list, dict)):
+                    raise FrameworkError(
+                        f"conditions[{index}].{name} must be scalar"
+                    )
+
+            identity = json.dumps(
+                condition,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            if identity in seen:
+                raise FrameworkError(
+                    f"duplicate explicit condition at index {index}"
+                )
+            seen.add(identity)
+
 
 def _validate_schedule(
     schedule: dict[str, Any],
@@ -119,6 +169,27 @@ def validate_experiment(experiment_dir: Path) -> list[str]:
         validate_request(request)
     except FrameworkError as exc:
         errors.append(str(exc))
+
+    campaign_path = experiment_dir / "config" / "campaign.json"
+    if campaign_path.is_file():
+        try:
+            campaign = read_json(campaign_path)
+            definition = campaign.get("definition")
+            expected = campaign.get("definition_sha256")
+            if not isinstance(definition, dict) or not isinstance(expected, str):
+                errors.append("config/campaign.json has invalid definition metadata")
+            else:
+                encoded = json.dumps(
+                    definition,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                actual = hashlib.sha256(encoded).hexdigest()
+                if actual != expected:
+                    errors.append("config/campaign.json definition SHA-256 mismatch")
+        except FrameworkError as exc:
+            errors.append(str(exc))
 
     state = None
     try:

@@ -51,6 +51,34 @@ class Http3ResolveTests(unittest.TestCase):
             "TLS_AES_128_GCM_SHA256",
         )
 
+    def test_explicit_conditions_keep_axes_out_of_common_parameters(self):
+        request = {
+            "workload": "http3",
+            "environment": "local",
+            "variants": ["stock", "ngi541-direct"],
+            "parameters": {"repetitions": 2},
+            "conditions": [
+                {"payload_bytes": 16384, "workers": 2, "clients": 16}
+            ],
+        }
+        common = {
+            "workload": "http3",
+            "environment": "local",
+            "variants": ["stock", "ngi541-direct"],
+            "parameters": {"repetitions": 2},
+            "conditions": [
+                {"payload_bytes": 16384, "workers": 2, "clients": 16}
+            ],
+            "comparison": {
+                "mode": "paired-balanced",
+                "random_seed": None,
+            },
+        }
+
+        resolved = resolve_http3_config(request, common)
+        self.assertNotIn("payload_bytes", resolved["parameters"])
+        self.assertEqual(resolved["conditions"][0]["clients"], 16)
+
     def test_invalid_axis_rejected(self):
         request = {
             "workload": "http3",
@@ -128,29 +156,13 @@ class Http3ConfigTests(unittest.TestCase):
 class Http3TlsPathTests(unittest.TestCase):
     def test_tls_paths_are_relative_to_config_directory(self):
         config = _nginx_config(
-            workers=1,
-            host="127.0.0.1",
-            port=8443,
-            worker_connections=4096,
-            keepalive_requests=20000,
+            workers=1, host="127.0.0.1", port=8443,
+            worker_connections=4096, keepalive_requests=20000,
         )
-
-        self.assertIn(
-            "ssl_certificate server.crt;",
-            config,
-        )
-        self.assertIn(
-            "ssl_certificate_key server.key;",
-            config,
-        )
-        self.assertNotIn(
-            "ssl_certificate conf/server.crt;",
-            config,
-        )
-        self.assertNotIn(
-            "ssl_certificate_key conf/server.key;",
-            config,
-        )
+        self.assertIn("ssl_certificate server.crt;", config)
+        self.assertIn("ssl_certificate_key server.key;", config)
+        self.assertNotIn("ssl_certificate conf/server.crt;", config)
+        self.assertNotIn("ssl_certificate_key conf/server.key;", config)
 
 
 if __name__ == "__main__":

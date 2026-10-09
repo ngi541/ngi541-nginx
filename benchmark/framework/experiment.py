@@ -14,6 +14,17 @@ if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
 
 from framework.analysis import analyze_experiment, validate_analysis_outputs
+from framework.campaign import (
+    campaign_record_matches,
+    discover_campaign_instances,
+    load_campaign_definition,
+    next_campaign_stage,
+    preparation_specs,
+    request_from_campaign,
+    resolve_campaign_config_path,
+    verify_source_requirements,
+    verify_active_framework_identity,
+)
 from framework.environment import prepare_environment
 from framework.ids import (
     generate_experiment_id,
@@ -92,6 +103,47 @@ def ensure_experiment_exists(experiment_id: str) -> Path:
     return path
 
 
+def _create_experiment_from_request(
+    request: dict[str, Any],
+    *,
+    campaign_record: dict[str, Any] | None = None,
+) -> tuple[str, Path]:
+    validate_request(request)
+
+    experiment_id = generate_experiment_id(
+        request["workload"],
+        request["environment"],
+    )
+    path = experiment_dir(experiment_id)
+
+    if path.exists():
+        raise FrameworkError(
+            f"refusing to overwrite existing experiment directory: {path}"
+        )
+
+    path.mkdir(parents=True)
+
+    for rel in COMMON_DIRS:
+        (path / rel).mkdir(parents=True, exist_ok=True)
+
+    write_immutable_json(path / "config" / "request.json", request)
+    if campaign_record is not None:
+        write_immutable_json(
+            path / "config" / "campaign.json",
+            campaign_record,
+        )
+
+    atomic_write_json(path / "state.json", initial_state(experiment_id))
+
+    append_log(
+        path / "logs" / "framework.log",
+        f"{utc_rfc3339()} experiment created id={experiment_id}",
+    )
+
+    transition(path, "PREPARING")
+    return experiment_id, path
+
+
 def command_create(args: argparse.Namespace) -> int:
     workload = validate_slug(args.workload, "workload")
     environment = validate_slug(args.environment, "environment")
@@ -132,31 +184,7 @@ def command_create(args: argparse.Namespace) -> int:
     if args.alias is not None:
         request["alias"] = args.alias
 
-    validate_request(request)
-
-    experiment_id = generate_experiment_id(workload, environment)
-    path = experiment_dir(experiment_id)
-
-    if path.exists():
-        raise FrameworkError(
-            f"refusing to overwrite existing experiment directory: {path}"
-        )
-
-    path.mkdir(parents=True)
-
-    for rel in COMMON_DIRS:
-        (path / rel).mkdir(parents=True, exist_ok=True)
-
-    write_immutable_json(path / "config" / "request.json", request)
-    atomic_write_json(path / "state.json", initial_state(experiment_id))
-
-    append_log(
-        path / "logs" / "framework.log",
-        f"{utc_rfc3339()} experiment created id={experiment_id}",
-    )
-
-    transition(path, "PREPARING")
-
+    experiment_id, path = _create_experiment_from_request(request)
     print(experiment_id)
     print(path)
     return 0
@@ -514,6 +542,201 @@ def command_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def _campaign_prepare_namespace(
+    experiment_id: str,
+    specs: dict[str, list[str]],
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        experiment_id=experiment_id,
+        source=specs["source"],
+        binary=specs["binary"],
+        runtime_library=specs["runtime_library"],
+        preflight=specs["preflight"],
+    )
+
+
+def _select_campaign_experiment(
+    args: argparse.Namespace,
+    definition: dict[str, Any],
+    campaign_record: dict[str, Any],
+) -> tuple[str, Path, bool]:
+    definition_sha = campaign_record["definition_sha256"]
+    campaign_name = campaign_record["campaign_name"]
+
+    if args.experiment_id is not None:
+        path = ensure_experiment_exists(args.experiment_id)
+        if not campaign_record_matches(path, definition_sha):
+            raise FrameworkError(
+                "--experiment-id does not reference an experiment created "
+                "from this campaign definition"
+            )
+        return args.experiment_id, path, False
+
+    instances = discover_campaign_instances(
+        EXPERIMENTS_ROOT,
+        campaign_name=campaign_name,
+        definition_sha256=definition_sha,
+    )
+
+    if not args.new:
+        incomplete = instances["exact_incomplete"]
+        if len(incomplete) > 1:
+            ids = ", ".join(path.name for path in incomplete)
+            raise FrameworkError(
+                "multiple incomplete experiments match this campaign; "
+                f"use --experiment-id to select one: {ids}"
+            )
+        if len(incomplete) == 1:
+            path = incomplete[0]
+            return path.name, path, False
+
+        drift = instances["name_drift_incomplete"]
+        if drift:
+            ids = ", ".join(path.name for path in drift)
+            raise FrameworkError(
+                "an incomplete experiment exists for the same campaign name "
+                "but the config definition changed; resume it with the original "
+                f"config or use --new intentionally: {ids}"
+            )
+
+        complete = instances["exact_complete"]
+        if complete:
+            path = complete[-1]
+            return path.name, path, False
+
+    request = request_from_campaign(definition)
+    experiment_id, path = _create_experiment_from_request(
+        request,
+        campaign_record=campaign_record,
+    )
+    return experiment_id, path, True
+
+
+def command_campaign(args: argparse.Namespace) -> int:
+    config_path = resolve_campaign_config_path(args.config, REPO_ROOT)
+    definition, campaign_record = load_campaign_definition(
+        config_path,
+        REPO_ROOT,
+    )
+
+    experiment_id, path, created = _select_campaign_experiment(
+        args,
+        definition,
+        campaign_record,
+    )
+
+    print(f"campaign:   {campaign_record['campaign_name']}")
+    print(f"config:     {campaign_record['source']['path'] or campaign_record['source']['basename']}")
+    print(f"config-sha: {campaign_record['definition_sha256']}")
+    print(f"experiment: {experiment_id}")
+    print(f"mode:       {'created' if created else 'resume'}")
+
+    try:
+        while True:
+            stage = next_campaign_stage(path)
+            state = load_state(path)
+            print(f"campaign-stage: {stage} (state={state['state']})")
+
+            if stage == "complete":
+                result = command_validate(
+                    argparse.Namespace(experiment_id=experiment_id)
+                )
+                if result != 0:
+                    return result
+                final = load_state(path)
+                print(f"campaign:   COMPLETE")
+                print(
+                    "runs:       "
+                    f"planned={final['runs']['planned']} "
+                    f"completed={final['runs']['completed']} "
+                    f"failed={final['runs']['failed']} "
+                    f"skipped={final['runs']['skipped']}"
+                )
+                print(f"results:    experiments/{experiment_id}/processed/statistics.json")
+                return 0
+
+            verify_source_requirements(definition, REPO_ROOT)
+
+            if state["state"] in {"READY", "RUNNING", "ABORTED", "ANALYZING"} or (
+                state["state"] == "FAILED"
+                and (state.get("failure") or {}).get("stage") in {"running", "analyzing"}
+            ):
+                verify_active_framework_identity(path, REPO_ROOT)
+
+            prepare_args = None
+            if stage in {"prepare", "execute"}:
+                specs = preparation_specs(definition, REPO_ROOT)
+                prepare_args = _campaign_prepare_namespace(
+                    experiment_id,
+                    specs,
+                )
+
+            if stage == "plan":
+                command_plan(argparse.Namespace(experiment_id=experiment_id))
+                continue
+
+            if stage == "prepare":
+                command_prepare(prepare_args)
+                continue
+
+            if stage == "seal":
+                command_seal(argparse.Namespace(experiment_id=experiment_id))
+                result = command_validate(
+                    argparse.Namespace(experiment_id=experiment_id)
+                )
+                if result != 0:
+                    return result
+                continue
+
+            if stage == "execute":
+                lifecycle = state["state"]
+                if lifecycle == "READY":
+                    result = command_validate(
+                        argparse.Namespace(experiment_id=experiment_id)
+                    )
+                    if result != 0:
+                        return result
+                result = command_execute(
+                    argparse.Namespace(experiment_id=experiment_id)
+                )
+                if result != 0:
+                    if result == 130:
+                        print(
+                            "resume:     rerun the same campaign --config command",
+                            file=sys.stderr,
+                        )
+                    return result
+
+                after = load_state(path)["state"]
+                if after == "ANALYZING":
+                    result = command_validate(
+                        argparse.Namespace(experiment_id=experiment_id)
+                    )
+                    if result != 0:
+                        return result
+                continue
+
+            if stage == "analyze":
+                result = command_validate(
+                    argparse.Namespace(experiment_id=experiment_id)
+                )
+                if result != 0:
+                    return result
+                command_analyze(argparse.Namespace(experiment_id=experiment_id))
+                continue
+
+            raise FrameworkError(f"unsupported campaign stage: {stage}")
+
+    except KeyboardInterrupt:
+        current = load_state(path)
+        print(
+            f"INTERRUPTED: campaign {experiment_id} stopped in state "
+            f"{current['state']}; rerun the same campaign command to resume",
+            file=sys.stderr,
+        )
+        return 130
+
 def command_status(args: argparse.Namespace) -> int:
     path = ensure_experiment_exists(args.experiment_id)
     state = read_json(path / "state.json")
@@ -702,6 +925,29 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("experiment_id")
     analyze.set_defaults(func=command_analyze)
 
+    campaign = subparsers.add_parser(
+        "campaign",
+        help=(
+            "run or resume a config-driven campaign through create, plan, "
+            "prepare, seal, execute, and analyze"
+        ),
+    )
+    campaign.add_argument(
+        "--config",
+        required=True,
+        help="versioned campaign JSON definition",
+    )
+    campaign.add_argument(
+        "--experiment-id",
+        help="resume a specific experiment created from this config",
+    )
+    campaign.add_argument(
+        "--new",
+        action="store_true",
+        help="create a new campaign instance even if a matching one exists",
+    )
+    campaign.set_defaults(func=command_campaign)
+
     status = subparsers.add_parser(
         "status",
         help="show experiment lifecycle state",
@@ -734,6 +980,9 @@ def main() -> int:
 
     if getattr(args, "repetitions", 1) < 1:
         parser.error("--repetitions must be >= 1")
+
+    if getattr(args, "new", False) and getattr(args, "experiment_id", None):
+        parser.error("--new and --experiment-id are mutually exclusive")
 
     try:
         return args.func(args)

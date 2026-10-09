@@ -73,6 +73,12 @@ def resolve_common_request(request: dict[str, Any]) -> dict[str, Any]:
     if request.get("alias") is not None:
         resolved["alias"] = request["alias"]
 
+    if request.get("conditions") is not None:
+        resolved["conditions"] = [
+            dict(condition)
+            for condition in request["conditions"]
+        ]
+
     return resolved
 
 
@@ -117,7 +123,21 @@ def build_schedule(
     mode = resolved["comparison"]["mode"]
     random_seed = resolved["comparison"].get("random_seed")
 
-    matrix = _parameter_matrix(parameters)
+    explicit_conditions = resolved.get("conditions")
+    if explicit_conditions is not None:
+        fixed = {
+            name: value
+            for name, value in parameters.items()
+            if name != "repetitions"
+        }
+        matrix = []
+        for condition in explicit_conditions:
+            row = dict(fixed)
+            row.update(condition)
+            matrix.append(row)
+    else:
+        matrix = _parameter_matrix(parameters)
+
     rng = random.Random(random_seed)
 
     runs: list[dict[str, Any]] = []

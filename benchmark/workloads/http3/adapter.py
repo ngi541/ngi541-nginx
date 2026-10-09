@@ -65,6 +65,7 @@ def resolve_http3_config(
     resolved: dict[str, Any],
 ) -> dict[str, Any]:
     parameters = dict(resolved["parameters"])
+    conditions = resolved.get("conditions")
 
     required_axes = {
         "payload_bytes": [16384],
@@ -72,9 +73,22 @@ def resolve_http3_config(
         "clients": [1],
     }
 
-    for name, default in required_axes.items():
-        parameters.setdefault(name, default)
-        _validate_int_axis(parameters[name], name)
+    if conditions is None:
+        for name, default in required_axes.items():
+            parameters.setdefault(name, default)
+            _validate_int_axis(parameters[name], name)
+    else:
+        normalized_conditions = []
+        for index, condition in enumerate(conditions):
+            row = dict(condition)
+            for name in required_axes:
+                if name not in row:
+                    raise FrameworkError(
+                        f"explicit HTTP/3 condition {index} is missing {name!r}"
+                    )
+                _positive_int(row[name], name)
+            normalized_conditions.append(row)
+        conditions = normalized_conditions
 
     for name, value in DEFAULTS.items():
         parameters.setdefault(name, value)
@@ -100,6 +114,8 @@ def resolve_http3_config(
 
     resolved = dict(resolved)
     resolved["parameters"] = parameters
+    if conditions is not None:
+        resolved["conditions"] = conditions
     resolved["workload_contract"] = {
         "adapter": "http3",
         "version": 1,
@@ -230,12 +246,20 @@ def prepare_http3_workload(
     preflight_dir.mkdir(parents=True, exist_ok=True)
 
     parameters = resolved["parameters"]
-    payload_sizes = sorted(
-        {
-            int(value)
-            for value in _axis_values(parameters["payload_bytes"])
-        }
-    )
+    if resolved.get("conditions") is not None:
+        payload_sizes = sorted(
+            {
+                int(condition["payload_bytes"])
+                for condition in resolved["conditions"]
+            }
+        )
+    else:
+        payload_sizes = sorted(
+            {
+                int(value)
+                for value in _axis_values(parameters["payload_bytes"])
+            }
+        )
 
     payload_records = []
     for size in payload_sizes:

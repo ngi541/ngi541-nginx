@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ngi541.org/schemas/campaign.schema.json",
+  "title": "NGI541 experiment campaign definition",
+  "type": "object",
+  "required": ["schema_version", "campaign", "experiment", "preparation"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "campaign": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+        "alias": {"type": "string"},
+        "description": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "experiment": {
+      "type": "object",
+      "required": ["workload", "environment", "variants", "repetitions", "parameters", "conditions"],
+      "properties": {
+        "workload": {"type": "string"},
+        "environment": {"type": "string"},
+        "variants": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "repetitions": {"type": "integer", "minimum": 1},
+        "comparison": {"type": "object"},
+        "alias": {"type": "string"},
+        "parameters": {"type": "object"},
+        "conditions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "object", "minProperties": 1}
+        }
+      },
+      "additionalProperties": false
+    },
+    "preparation": {
+      "type": "object",
+      "required": ["binaries"],
+      "properties": {
+        "binaries": {"type": "object", "minProperties": 1},
+        "runtime_libraries": {"type": "object"},
+        "source_requirements": {"type": "object"},
+        "sources": {"type": "array"},
+        "preflight": {"type": "array"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

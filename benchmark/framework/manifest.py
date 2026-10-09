@@ -99,6 +99,11 @@ def build_manifest(
         "config": {
             "request": "config/request.json",
             "resolved": "config/resolved.json",
+            **(
+                {"campaign": "config/campaign.json"}
+                if (experiment_dir / "config" / "campaign.json").is_file()
+                else {}
+            ),
         },
         "environment": {
             "adapter": "environment/adapter.json",

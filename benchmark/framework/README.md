@@ -128,3 +128,16 @@ OpenSSL-compatible certificate generation command
 ```
 
 No NumPy, pandas, matplotlib, PyYAML, or JSON-Schema runtime package is required.
+
+## R5.6 config-driven campaign orchestration
+
+A versioned campaign definition can drive the complete experiment lifecycle:
+
+```bash
+./scripts/experiment.sh campaign \
+  --config benchmark/configs/c2.2-local-http3.json
+```
+
+The command creates or resumes the matching experiment and advances only through legal lifecycle transitions: plan, prepare, seal, validate, execute, validate, analyze. The campaign definition is snapshotted into `config/campaign.json` and identified by a canonical SHA-256.
+
+Explicit `experiment.conditions` are ordered exact conditions and are not expanded as a Cartesian matrix. See `docs/campaigns.md`.
