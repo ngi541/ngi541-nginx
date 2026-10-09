@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from framework.analysis import validate_analysis_outputs
 from framework.ids import (
     EXPERIMENT_ID_RE,
     PAIR_ID_RE,
@@ -229,5 +230,8 @@ def validate_experiment(experiment_dir: Path) -> list[str]:
                         f"completed execution missing valid measurement: "
                         f"{run['run_id']}"
                     )
+
+    if state and state.get("state") == "COMPLETE":
+        errors.extend(validate_analysis_outputs(experiment_dir))
 
     return errors

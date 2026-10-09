@@ -13,6 +13,7 @@ BENCHMARK_DIR = SCRIPT_DIR.parent
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
 
+from framework.analysis import analyze_experiment, validate_analysis_outputs
 from framework.environment import prepare_environment
 from framework.ids import (
     generate_experiment_id,
@@ -440,6 +441,79 @@ def command_execute(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_analyze(args: argparse.Namespace) -> int:
+    path = ensure_experiment_exists(args.experiment_id)
+    state = load_state(path)
+
+    if state["state"] == "FAILED":
+        if state.get("failure", {}).get("stage") != "analyzing":
+            raise FrameworkError(
+                "analyze can resume only a FAILED analysis; "
+                "this experiment failed during another stage"
+            )
+        transition(path, "ANALYZING")
+    elif state["state"] != "ANALYZING":
+        raise FrameworkError(
+            "analyze requires ANALYZING or analysis-FAILED state; "
+            f"current state is {state['state']}"
+        )
+
+    try:
+        result = analyze_experiment(path)
+
+        errors = validate_analysis_outputs(path)
+        if errors:
+            raise FrameworkError(
+                "generated analysis outputs failed validation: "
+                + "; ".join(errors)
+            )
+
+        common_errors = validate_experiment(path)
+        if common_errors:
+            raise FrameworkError(
+                "experiment failed validation before completion: "
+                + "; ".join(common_errors)
+            )
+
+        transition(path, "COMPLETE")
+
+        final_errors = validate_experiment(path)
+        if final_errors:
+            raise FrameworkError(
+                "completed experiment failed validation: "
+                + "; ".join(final_errors)
+            )
+
+    except Exception as exc:
+        current = load_state(path)
+        if current["state"] == "ANALYZING":
+            transition(
+                path,
+                "FAILED",
+                failure={
+                    "stage": "analyzing",
+                    "message": str(exc),
+                    "run_id": None,
+                },
+            )
+        raise
+
+    append_log(
+        path / "logs" / "framework.log",
+        f"{utc_rfc3339()} deterministic analysis complete "
+        f"selected_runs={result['selected_runs']} "
+        f"conditions={result['conditions']} pairs={result['pairs']}",
+    )
+
+    print(f"experiment: {args.experiment_id}")
+    print("state:      COMPLETE")
+    print(f"runs:       analyzed={result['selected_runs']}")
+    print(f"conditions: {result['conditions']}")
+    print(f"pairs:      {result['pairs']}")
+    print("results:    processed/statistics.json")
+    return 0
+
+
 def command_status(args: argparse.Namespace) -> int:
     path = ensure_experiment_exists(args.experiment_id)
     state = read_json(path / "state.json")
@@ -620,6 +694,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     execute.add_argument("experiment_id")
     execute.set_defaults(func=command_execute)
+
+    analyze = subparsers.add_parser(
+        "analyze",
+        help="analyze frozen raw measurements and complete the experiment",
+    )
+    analyze.add_argument("experiment_id")
+    analyze.set_defaults(func=command_analyze)
 
     status = subparsers.add_parser(
         "status",

@@ -2,9 +2,9 @@
 
 The R5 framework provides a portable, standard-library-only lifecycle for reproducible NGI541 network-data-path experiments.
 
-## Implemented through R5.4
+## Implemented through R5.5
 
-Current functionality includes:
+Current commands are:
 
 ```text
 create
@@ -12,35 +12,74 @@ plan
 prepare
 seal
 execute
+analyze
 status
 validate
 ```
 
-R5.4 adds the first measured workload adapter: NGINX HTTP/3.
-
-The successful lifecycle is now:
+R5.4 added the first measured workload adapter: NGINX HTTP/3.
+R5.5 adds deterministic analysis and closes the lifecycle:
 
 ```text
 CREATED
   ↓
 PREPARING
-  ↓ plan
-PREPARING
-  ↓ prepare
-PREPARING
-  ↓ seal
+  ↓ plan / prepare / seal
 READY
   ↓ execute
 RUNNING
-  ↓ all scheduled runs valid
+  ↓ all scheduled runs have a valid measurement
 ANALYZING
+  ↓ analyze
+COMPLETE
 ```
 
-R5.5 will implement generic statistical analysis, CSV/JSON summaries, dependency-free SVG rendering, generated result README content, and the `ANALYZING -> COMPLETE` transition.
+## Analysis contract
+
+`analyze` consumes the frozen schedule plus append-only raw `measurement.json` files. It does not run the workload again.
+
+Attempt selection is metric-independent:
+
+```text
+for each scheduled run_id:
+    sort attempts by attempt number
+    select the first attempt with execution.valid == true
+```
+
+A later valid attempt is never substituted because it has a better metric. If the first valid attempt is structurally malformed, analysis fails rather than falling forward to a later attempt.
+
+The primary metric for the current HTTP/3 adapter is `requests_per_second`.
+
+Generated artifacts:
+
+```text
+processed/selection.json
+processed/runs.csv
+processed/summary.csv
+processed/pairs.csv
+processed/statistics.json
+processed/analysis-provenance.json
+processed/README.md
+processed/artifacts.sha256
+figures/requests-per-second.svg
+figures/paired-delta.svg
+```
+
+Per-variant summaries contain `n`, mean, median, min, max, sample standard deviation, and coefficient of variation. Sample standard deviation and CV are null for `n < 2`.
+
+For `paired-balanced` experiments with exactly two variants, the first variant in the sealed resolved configuration is the baseline and the second is the candidate. Pair delta is:
+
+```text
+(candidate / baseline - 1) * 100
+```
+
+Paired output includes per-pair delta, wins/losses/ties, mean and median paired delta, and geometric-mean ratio when every ratio is positive.
+
+All analysis output is generated with the Python standard library. SVG files are dependency-free and deterministic. `processed/artifacts.sha256` protects the generated result set, and COMPLETE validation rechecks those hashes.
 
 ## HTTP/3 example
 
-Create a small smoke experiment:
+Create a smoke experiment:
 
 ```bash
 ./scripts/experiment.sh create \
@@ -56,57 +95,31 @@ Create a small smoke experiment:
   --param 'warmup_requests_per_client=5'
 ```
 
-Plan:
+After `plan`, `prepare`, `seal`, and `execute`, successful execution ends in `ANALYZING`.
+
+Complete it with:
 
 ```bash
-./scripts/experiment.sh plan <experiment-id>
+./scripts/experiment.sh analyze <experiment-id>
+./scripts/experiment.sh validate <experiment-id>
 ```
 
-Prepare with exact runtime artifacts:
-
-```bash
-./scripts/experiment.sh prepare <experiment-id> \
-  --binary stock=/path/to/stock/nginx \
-  --binary ngi541-direct=/path/to/ngi541/nginx \
-  --runtime-library ngi541-direct=/path/to/libngi541_engine.dylib
-```
-
-Repeat `--runtime-library` if the runtime loader needs several versioned library files.
-
-Seal:
-
-```bash
-./scripts/experiment.sh seal <experiment-id>
-```
-
-Execute:
-
-```bash
-./scripts/experiment.sh execute <experiment-id>
-```
-
-Every schedule entry produces an append-only raw measurement attempt. A successful R5.4 execution ends in `ANALYZING`.
+A successful analysis ends in `COMPLETE`.
 
 ## Runtime artifact rule
 
-Variant runtime paths are provided only during preparation.
-
-The sealed experiment stores relative artifact locations and SHA-256 identities.
-
-Execution re-verifies hashes before copying those artifacts into an ephemeral per-attempt runtime directory.
-
-This prevents a later rebuild at the same filesystem path from silently changing the runtime under test.
+Variant runtime paths are provided only during preparation. The sealed experiment stores relative artifact locations and SHA-256 identities. Execution re-verifies hashes before copying those artifacts into an ephemeral per-attempt runtime directory.
 
 ## Dependencies
 
-Core framework:
+Core framework and R5.5 analysis:
 
 ```text
 Python 3 standard library
 Git
 ```
 
-HTTP/3 workload additionally requires:
+HTTP/3 execution additionally requires:
 
 ```text
 NGINX with --with-http_v3_module
