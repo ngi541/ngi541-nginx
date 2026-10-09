@@ -381,8 +381,8 @@ http {{
         listen {host}:{port} quic{reuseport};
 
         ssl_protocols TLSv1.3;
-        ssl_certificate conf/server.crt;
-        ssl_certificate_key conf/server.key;
+        ssl_certificate server.crt;
+        ssl_certificate_key server.key;
 
         http3 on;
 

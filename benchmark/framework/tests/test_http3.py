@@ -125,5 +125,33 @@ class Http3ConfigTests(unittest.TestCase):
         self.assertNotIn("quic reuseport", config)
 
 
+class Http3TlsPathTests(unittest.TestCase):
+    def test_tls_paths_are_relative_to_config_directory(self):
+        config = _nginx_config(
+            workers=1,
+            host="127.0.0.1",
+            port=8443,
+            worker_connections=4096,
+            keepalive_requests=20000,
+        )
+
+        self.assertIn(
+            "ssl_certificate server.crt;",
+            config,
+        )
+        self.assertIn(
+            "ssl_certificate_key server.key;",
+            config,
+        )
+        self.assertNotIn(
+            "ssl_certificate conf/server.crt;",
+            config,
+        )
+        self.assertNotIn(
+            "ssl_certificate_key conf/server.key;",
+            config,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
